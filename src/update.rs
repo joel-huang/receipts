@@ -1,17 +1,16 @@
 //! Self-update from GitHub releases.
 //!
-//! Once a day, a normal run asks GitHub for the newest release. If it is newer, the user gets a
-//! y/n prompt. The update downloads the archive for this platform, checks its SHA-256 against
-//! the `.sha256` file from the release, and swaps the new binary in place of the running one.
+//! Every normal run asks GitHub for the newest release. If it is newer, the user gets a y/n
+//! prompt. The update downloads the archive for this platform, checks its SHA-256 against the
+//! `.sha256` file from the release, and swaps the new binary in place of the running one.
 
 use std::io::{IsTerminal, Read, Write};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use sha2::{Digest, Sha256};
 
 const REPO: &str = "joel-huang/receipts";
-const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// Release asset names use the Rust target triple; build.rs exports it.
 const TARGET: &str = env!("RECEIPTS_TARGET");
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -19,12 +18,13 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Runs before every command except `update`. A failed check prints nothing, so an offline run
 /// stays quiet. A failed install after the user says yes prints an error.
 pub fn auto_update() {
-    if !auto_enabled() || !check_due() {
+    if !auto_enabled() {
         return;
     }
-    let checker = agent(Duration::from_secs(3));
-    let Ok(Some(tag)) = newer_release(&checker) else { return };
-
+    let Ok(tag) = latest_tag(Duration::from_secs(3)) else { return };
+    if !is_newer(&tag) {
+        return;
+    }
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         eprintln!("receipts: {tag} is available (you have v{CURRENT}). Run `receipts update` to install it.");
         return;
@@ -32,7 +32,7 @@ pub fn auto_update() {
     if !confirm(&format!("receipts: {tag} is available (you have v{CURRENT}). Update now? [y/N] ")) {
         return;
     }
-    match install(&agent(Duration::from_secs(60)), &tag) {
+    match install(&tag) {
         Ok(()) => eprintln!("receipts: updated to {tag}. The new version starts the next time you run receipts."),
         Err(e) => eprintln!("receipts: update failed: {e:#}. Run `receipts update` to retry."),
     }
@@ -40,12 +40,12 @@ pub fn auto_update() {
 
 /// `receipts update`: check now and install without asking.
 pub fn update_command() -> anyhow::Result<()> {
-    let agent = agent(Duration::from_secs(60));
-    match newer_release(&agent)? {
+    let tag = latest_tag(Duration::from_secs(10))?;
+    match is_newer(&tag).then_some(tag) {
         None => println!("receipts v{CURRENT} is the latest version."),
         Some(tag) => {
             println!("Updating v{CURRENT} to {tag}…");
-            install(&agent, &tag)?;
+            install(&tag)?;
             println!("Updated to {tag}.");
         }
     }
@@ -62,23 +62,6 @@ fn auto_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Records the check time before the check runs, so a failed or declined check waits a day too.
-fn check_due() -> bool {
-    let dir = crate::index::data_dir();
-    let stamp = dir.join("last-update-check");
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < CHECK_INTERVAL_SECS {
-        return false;
-    }
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(&stamp, now.to_string());
-    true
-}
-
 fn confirm(question: &str) -> bool {
     eprint!("{question}");
     let _ = std::io::stderr().flush();
@@ -86,27 +69,28 @@ fn confirm(question: &str) -> bool {
     std::io::stdin().read_line(&mut answer).is_ok() && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
-fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::AgentBuilder::new()
+const USER_AGENT: &str = concat!("receipts/", env!("CARGO_PKG_VERSION"));
+
+/// GitHub redirects /releases/latest to /releases/tag/<tag>. The check reads the tag from the
+/// redirect and does not follow it, so it skips the release web page. It also avoids the REST
+/// API and its limit of 60 unauthenticated requests an hour.
+fn latest_tag(timeout: Duration) -> anyhow::Result<String> {
+    let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))
         .timeout(timeout)
-        .user_agent(concat!("receipts/", env!("CARGO_PKG_VERSION")))
-        .build()
+        .redirects(0)
+        .user_agent(USER_AGENT)
+        .build();
+    let resp = agent.get(&format!("https://github.com/{REPO}/releases/latest")).call()?;
+    resp.header("location")
+        .and_then(|l| l.rsplit_once("/tag/"))
+        .map(|(_, t)| t.to_string())
+        .context("the repo has no published release")
 }
 
-/// GitHub redirects /releases/latest to /releases/tag/<tag>. Reading the redirect avoids the
-/// REST API and its limit of 60 unauthenticated requests an hour.
-fn newer_release(agent: &ureq::Agent) -> anyhow::Result<Option<String>> {
-    let resp = agent.get(&format!("https://github.com/{REPO}/releases/latest")).call()?;
-    let tag = resp
-        .get_url()
-        .rsplit_once("/tag/")
-        .map(|(_, t)| t.to_string())
-        .context("the repo has no published release")?;
-    let (Some(latest), Some(current)) = (parse_version(&tag), parse_version(CURRENT)) else {
-        bail!("cannot compare versions {tag} and v{CURRENT}");
-    };
-    Ok((latest > current).then_some(tag))
+/// True if `tag` is a newer version than this binary. Tags that do not parse count as not newer.
+fn is_newer(tag: &str) -> bool {
+    matches!((parse_version(tag), parse_version(CURRENT)), (Some(latest), Some(current)) if latest > current)
 }
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
@@ -119,25 +103,49 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
-fn download(agent: &ureq::Agent, url: &str) -> anyhow::Result<Vec<u8>> {
+/// Downloads `url` into memory. With a `progress` label, it shows the size downloaded so far.
+fn download(agent: &ureq::Agent, url: &str, progress: Option<&str>) -> anyhow::Result<Vec<u8>> {
+    let resp = agent.get(url).call().with_context(|| format!("download {url}"))?;
+    let total = resp.header("content-length").and_then(|v| v.parse::<f64>().ok());
+    let mut reader = resp.into_reader().take(200 * 1024 * 1024);
     let mut buf = Vec::new();
-    agent
-        .get(url)
-        .call()
-        .with_context(|| format!("download {url}"))?
-        .into_reader()
-        .take(200 * 1024 * 1024)
-        .read_to_end(&mut buf)?;
+    let mut chunk = vec![0; 64 * 1024];
+    let mb = |bytes: f64| bytes / 1024.0 / 1024.0;
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(label) = progress {
+            match total {
+                Some(t) => eprint!("\r{label} {:.1} / {:.1} MB", mb(buf.len() as f64), mb(t)),
+                None => eprint!("\r{label} {:.1} MB", mb(buf.len() as f64)),
+            }
+        }
+    }
+    if progress.is_some() {
+        eprintln!();
+    }
     Ok(buf)
 }
 
-fn install(agent: &ureq::Agent, tag: &str) -> anyhow::Result<()> {
+fn install(tag: &str) -> anyhow::Result<()> {
+    // No limit on the total time, so a slow connection can finish. A download fails only if no
+    // data arrives for 30 seconds.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
+        .user_agent(USER_AGENT)
+        .build();
     let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
     let asset = format!("receipts-{TARGET}.{ext}");
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
 
-    let archive = download(agent, &format!("{base}/{asset}"))?;
-    let sums = String::from_utf8(download(agent, &format!("{base}/{asset}.sha256"))?)?;
+    let label = format!("receipts: downloading {tag}…");
+    let progress = std::io::stderr().is_terminal().then_some(label.as_str());
+    let archive = download(&agent, &format!("{base}/{asset}"), progress)?;
+    let sums = String::from_utf8(download(&agent, &format!("{base}/{asset}.sha256"), None)?)?;
     let expected = sums.split_whitespace().next().context("empty checksum file")?.to_lowercase();
     let actual = format!("{:x}", Sha256::digest(&archive));
     if expected != actual {

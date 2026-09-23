@@ -32,14 +32,15 @@ receipts where           # print the database path
 receipts update          # update to the newest release
 ```
 
-Once a day, `receipts` checks GitHub for a newer release. If it finds one, it asks before it updates.
+Each time it runs, `receipts` checks GitHub for a newer release. If it finds one, it asks before it
+updates.
 Set `RECEIPTS_NO_UPDATE=1` to turn the check off.
 
 | Variable | Default |
 | --- | --- |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` |
 | `CODEX_HOME` | `~/.codex` |
-| `RECEIPTS_NO_UPDATE` | unset (set it to turn off the daily update check) |
+| `RECEIPTS_NO_UPDATE` | unset (set it to turn off the update check) |
 | `RECEIPTS_HOME` | platform data dir (`~/Library/Application Support/receipts`, `~/.local/share/receipts`, `%APPDATA%\receipts`) |
 
 The server binds to `127.0.0.1` and rejects any non-localhost `Host` header, which blocks DNS-rebinding attacks.
