@@ -33,7 +33,11 @@ pub fn auto_update() {
         return;
     }
     match install(&tag) {
-        Ok(()) => eprintln!("receipts: updated to {tag}. The new version starts the next time you run receipts."),
+        Ok(()) => {
+            // The old version is still running. Exit so that the next run uses the new version.
+            eprintln!("receipts: updated to {tag}. Run `receipts` again to start it.");
+            std::process::exit(0);
+        }
         Err(e) => eprintln!("receipts: update failed: {e:#}. Run `receipts update` to retry."),
     }
 }
