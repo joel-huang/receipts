@@ -1,4 +1,4 @@
-# 🧾 Receipts
+# Receipts
 
 Review and explore your agentic chats across Claude Code, Codex and other agents, all in one local, searchable place.
 

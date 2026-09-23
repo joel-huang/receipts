@@ -119,7 +119,7 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo">🧾</span> Receipts
+          Receipts
           {status && <span className="muted version">v{status.version}</span>}
         </div>
         <nav>
