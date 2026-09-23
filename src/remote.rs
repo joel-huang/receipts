@@ -1,31 +1,25 @@
-//! `receipts remote <target>`: browse the chats on another machine over SSH.
+//! Connections to other machines over SSH.
 //!
-//! The command starts `receipts serve` on the remote machine, bound to its 127.0.0.1, and opens an
-//! SSH tunnel to it. A local server then serves this machine's web UI and forwards `/api/...`
-//! requests through the tunnel. The remote chats never land on this machine's disk. All SSH
-//! connections share one login through SSH connection sharing (ControlMaster).
+//! A connection installs or updates receipts on the remote machine, starts `receipts serve` there,
+//! bound to its 127.0.0.1, and opens an SSH tunnel to it. The local server then forwards API
+//! requests through the tunnel (see `machines.rs`), so the remote chats never land on this
+//! machine's disk. All SSH commands for a machine share one login through SSH connection sharing
+//! (ControlMaster).
 
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use base64::Engine;
-use axum::body::Body;
-use axum::extract::{Request, State};
-use axum::http::{header, HeaderValue, StatusCode, Uri};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use axum::Router;
-use http_body_util::BodyExt;
-use hyper_util::client::legacy::{connect::HttpConnector, Client};
-use hyper_util::rt::TokioExecutor;
 
-use crate::{server, update};
+use crate::update;
+
+/// Reports progress while a connection starts, such as "installing receipts on devbox".
+pub type Log<'a> = &'a (dyn Fn(String) + Send + Sync);
 
 const INSTALL_SH: &str = "https://github.com/joel-huang/receipts/releases/latest/download/install.sh";
 const INSTALL_PS1: &str = "https://github.com/joel-huang/receipts/releases/latest/download/install.ps1";
@@ -106,26 +100,54 @@ impl Ssh {
     }
 }
 
-pub async fn run(target: String, ssh_args: Vec<String>, port: u16, open_browser: bool) -> anyhow::Result<()> {
-    let mut ssh = Ssh {
-        target,
-        args: ssh_args,
-        control_path: std::env::temp_dir().join(format!("receipts-ssh-{}", std::process::id())),
-        windows: false,
-    };
-    let result = async {
-        ssh.windows = detect_windows(&ssh)?;
-        serve_remote(&ssh, port, open_browser).await
-    }
-    .await;
-    ssh.close();
-    result
+/// A running remote server and the SSH tunnel to it. Dropping it stops the remote server and
+/// closes the SSH connection.
+pub struct Connection {
+    ssh: Ssh,
+    server: Child,
+    /// Local end of the tunnel to the remote server.
+    pub port: u16,
 }
 
-async fn serve_remote(ssh: &Ssh, port: u16, open_browser: bool) -> anyhow::Result<()> {
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+        self.ssh.close();
+    }
+}
+
+/// Connects to `target`, an SSH target such as `user@host` or a Host from ~/.ssh/config. This
+/// blocks for as long as the SSH steps take, so call it off the async runtime.
+pub fn connect(target: &str, ssh_args: &[String], log: Log) -> anyhow::Result<Connection> {
+    // Each connection gets its own socket. The path stays short, because socket paths have a
+    // length limit of about 100 characters.
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let mut ssh = Ssh {
+        target: target.to_string(),
+        args: ssh_args.to_vec(),
+        control_path: std::env::temp_dir().join(format!(
+            "receipts-{}-{}",
+            std::process::id(),
+            COUNT.fetch_add(1, Ordering::SeqCst)
+        )),
+        windows: false,
+    };
+    match start(&mut ssh, log) {
+        Ok((server, port)) => Ok(Connection { ssh, server, port }),
+        Err(e) => {
+            ssh.close();
+            Err(e)
+        }
+    }
+}
+
+fn start(ssh: &mut Ssh, log: Log) -> anyhow::Result<(Child, u16)> {
+    log(format!("Connecting to {}", ssh.target));
+    ssh.windows = detect_windows(ssh)?;
+    let version = ensure_remote_version(ssh, log)?;
     let target = &ssh.target;
-    let version = ensure_remote_version(ssh)?;
-    eprintln!("receipts: {target} has receipts {version}");
+    log(format!("Starting receipts {version} on {target}"));
 
     // On POSIX, -tt gives the remote command a terminal, so it stops when this SSH session ends.
     // Windows OpenSSH ends the session's processes itself, and a Windows terminal session would
@@ -146,7 +168,13 @@ async fn serve_remote(ssh: &Ssh, port: u16, open_browser: bool) -> anyhow::Resul
         .stderr(Stdio::inherit())
         .spawn()
         .context("run ssh")?;
-    let remote_port = read_remote_port(&mut server)?;
+    let remote_port = match read_remote_port(&mut server, target) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = server.kill();
+            return Err(e);
+        }
+    };
 
     // Add the tunnel to the shared connection. A separate `ssh -N -L` process can hand the
     // forward to the shared connection and exit right away. Closing the connection removes it.
@@ -162,38 +190,14 @@ async fn serve_remote(ssh: &Ssh, port: u16, open_browser: bool) -> anyhow::Resul
         .status()
         .context("run ssh")?;
     if !forwarded.success() {
+        let _ = server.kill();
         bail!("could not open an ssh tunnel to {target}");
     }
-    wait_for_port(tunnel_port)?;
-
-    let proxy = Arc::new(Proxy {
-        client: Client::builder(TokioExecutor::new()).build_http(),
-        upstream: tunnel_port,
-        remote: target.clone(),
-    });
-    let app = Router::new()
-        .route("/api/{*path}", any(forward))
-        .fallback(server::static_asset)
-        .layer(middleware::from_fn(loopback_only))
-        .with_state(proxy);
-    let listener = server::bind("127.0.0.1", port).await?;
-    let url = format!("http://{}", listener.local_addr()?);
-    println!("Receipts on {target} running at {url}  (Ctrl+C to stop)");
-    if open_browser {
-        let _ = open::that(&url);
+    if let Err(e) = wait_for_port(tunnel_port) {
+        let _ = server.kill();
+        return Err(e);
     }
-
-    // Stop on Ctrl+C, or when the remote server ends.
-    let server_done = tokio::task::spawn_blocking(move || server.wait());
-    let result = tokio::select! {
-        _ = tokio::signal::ctrl_c() => Ok(()),
-        served = axum::serve(listener, app) => served.map_err(Into::into),
-        status = server_done => match status {
-            Ok(Ok(s)) => Err(anyhow::anyhow!("the remote server stopped ({s})")),
-            _ => Err(anyhow::anyhow!("the remote server stopped")),
-        },
-    };
-    result
+    Ok((server, tunnel_port))
 }
 
 // ---- remote version ----------------------------------------------------------------------------
@@ -201,17 +205,17 @@ async fn serve_remote(ssh: &Ssh, port: u16, open_browser: bool) -> anyhow::Resul
 /// Installs receipts on the remote machine if it is missing, and updates it if it is older than
 /// this machine's version. The local web UI then never asks the remote API for fields that it
 /// lacks. Returns the remote version, such as "0.2.3".
-fn ensure_remote_version(ssh: &Ssh) -> anyhow::Result<String> {
+fn ensure_remote_version(ssh: &Ssh, log: Log) -> anyhow::Result<String> {
     let target = &ssh.target;
     let local = env!("CARGO_PKG_VERSION");
     let version = match remote_version(ssh)? {
         None => {
-            eprintln!("receipts: installing receipts on {target}");
+            log(format!("Installing receipts on {target}"));
             install_remote(ssh)?;
             remote_version(ssh)?.with_context(|| format!("receipts is still missing on {target} after the install"))?
         }
         Some(v) if older(&v, local) => {
-            eprintln!("receipts: updating receipts on {target} from {v} to match {local}");
+            log(format!("Updating receipts on {target} from {v} to {local}"));
             // `receipts update` exists from 0.1.1 on. Older versions need the installer.
             let update = ssh.script(
                 format!(r#"{FIND_POSIX}; "$R" update"#),
@@ -225,7 +229,7 @@ fn ensure_remote_version(ssh: &Ssh) -> anyhow::Result<String> {
         Some(v) => v,
     };
     if older(&version, local) {
-        eprintln!("receipts: {target} still has {version}, older than {local}. Some views may not work.");
+        log(format!("{target} still has receipts {version}, older than {local}. Some views may not work."));
     }
     Ok(version)
 }
@@ -273,8 +277,8 @@ fn install_remote(ssh: &Ssh) -> anyhow::Result<()> {
 // ---- remote server and tunnel ------------------------------------------------------------------
 
 /// Reads the remote server's output until it prints "Receipts running at http://127.0.0.1:<port>".
-/// Later output, such as the startup scan count, is passed through with a `remote:` prefix.
-fn read_remote_port(server: &mut Child) -> anyhow::Result<u16> {
+/// Later output, such as the startup scan count, is printed here with the machine's name.
+fn read_remote_port(server: &mut Child, target: &str) -> anyhow::Result<u16> {
     let stdout = server.stdout.take().context("read the remote server output")?;
     let mut lines = BufReader::new(stdout).lines();
     let marker = "Receipts running at http://127.0.0.1:";
@@ -289,9 +293,10 @@ fn read_remote_port(server: &mut Child) -> anyhow::Result<u16> {
                 .unwrap_or("")
                 .parse()
                 .with_context(|| format!("read the port from: {line}"))?;
+            let target = target.to_string();
             std::thread::spawn(move || {
                 for line in lines.map_while(Result::ok) {
-                    eprintln!("remote: {}", line.trim_end_matches('\r'));
+                    eprintln!("{target}: {}", line.trim_end_matches('\r'));
                 }
             });
             return Ok(port);
@@ -315,58 +320,4 @@ fn wait_for_port(port: u16) -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
     bail!("the ssh tunnel did not open local port {port}")
-}
-
-// ---- local server ------------------------------------------------------------------------------
-
-struct Proxy {
-    client: Client<HttpConnector, Body>,
-    /// Local end of the SSH tunnel to the remote server.
-    upstream: u16,
-    /// SSH target, which the web UI shows next to file paths.
-    remote: String,
-}
-
-async fn loopback_only(req: Request, next: Next) -> Response {
-    match server::host_rejection(&req, &[]) {
-        None => next.run(req).await,
-        Some(resp) => resp,
-    }
-}
-
-/// Forwards an API request through the tunnel. The status response also gets a `remote` field,
-/// so the web UI can mark file paths as remote.
-async fn forward(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
-    let path = req.uri().path().to_string();
-    let path_and_query = req.uri().path_and_query().map_or("/", |p| p.as_str()).to_string();
-    let upstream = format!("127.0.0.1:{}", proxy.upstream);
-    let (mut parts, body) = req.into_parts();
-    parts.uri = match format!("http://{upstream}{path_and_query}").parse::<Uri>() {
-        Ok(uri) => uri,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    // The remote server only answers loopback hostnames.
-    parts.headers.insert(header::HOST, HeaderValue::from_str(&upstream).expect("valid host"));
-    // The status response gets a field added below, so it must arrive uncompressed. Other
-    // responses pass through compressed, which keeps them small over the SSH link.
-    if path == "/api/status" {
-        parts.headers.remove(header::ACCEPT_ENCODING);
-    }
-
-    let resp = match proxy.client.request(Request::from_parts(parts, body)).await {
-        Ok(resp) => resp,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("the remote server did not answer: {e}")).into_response(),
-    };
-    if path != "/api/status" || !resp.status().is_success() {
-        return resp.map(Body::new).into_response();
-    }
-    let bytes = match resp.into_body().collect().await {
-        Ok(b) => b.to_bytes(),
-        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    };
-    let mut status: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
-    if let Some(obj) = status.as_object_mut() {
-        obj.insert("remote".into(), proxy.remote.clone().into());
-    }
-    axum::Json(status).into_response()
 }

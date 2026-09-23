@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use rusqlite::Connection;
 use rust_embed::RustEmbed;
@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::index;
+use crate::machines::{self, Machines, SharedMachines};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -23,6 +24,8 @@ struct Assets;
 
 struct AppState {
     db_path: PathBuf,
+    /// Other machines from ~/.ssh/config that the web app can browse.
+    machines: SharedMachines,
     /// Hostnames besides loopback that the server answers, in lowercase.
     allowed_hosts: Vec<String>,
     conn: Mutex<Connection>,
@@ -64,6 +67,7 @@ pub async fn serve(
         .filter(|h| !h.is_empty())
         .collect();
     let state: Shared = Arc::new(AppState {
+        machines: Machines::new(),
         allowed_hosts,
         conn: Mutex::new(index::open(&db_path)?),
         db_path,
@@ -74,6 +78,8 @@ pub async fn serve(
 
     // Serve immediately; index in the background so the UI fills in as it goes.
     spawn_reindex(state.clone(), true);
+    state.machines.start_checks();
+    let machines = state.machines.clone();
 
     let extra_hosts = state.allowed_hosts.clone();
     let app = Router::new()
@@ -85,6 +91,9 @@ pub async fn serve(
         .route("/api/facets", get(facets))
         .route("/api/search", get(search))
         .route("/api/reindex", post(reindex))
+        .route("/api/machines", get(list_machines))
+        .route("/api/machines/{name}/connect", post(connect_machine))
+        .route("/api/m/{name}/{*rest}", any(forward_to_machine))
         .fallback(static_asset)
         // Chat logs compress well, which matters over a slow link such as `receipts remote`.
         .layer(tower_http::compression::CompressionLayer::new())
@@ -105,7 +114,24 @@ pub async fn serve(
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    // Stop the remote servers and close their SSH connections.
+    tokio::task::spawn_blocking(move || machines.disconnect_all()).await?;
     Ok(())
+}
+
+async fn list_machines(State(s): State<Shared>) -> Json<Vec<machines::MachineInfo>> {
+    Json(s.machines.list())
+}
+
+async fn connect_machine(State(s): State<Shared>, Path(name): Path<String>) -> Response {
+    match s.machines.connect(&name) {
+        Some(info) => Json(info).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("{name} is not in ~/.ssh/config") }))).into_response(),
+    }
+}
+
+async fn forward_to_machine(State(s): State<Shared>, Path((name, rest)): Path<(String, String)>, req: Request) -> Response {
+    machines::forward(&s.machines, &name, &rest, req).await
 }
 
 /// Try the requested port, then the next few, so a second instance still starts.
