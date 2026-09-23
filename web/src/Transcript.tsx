@@ -8,6 +8,13 @@ import { RemoteIcon } from "./RemoteIcon";
 
 type Filters = { tools: boolean; thinking: boolean; system: boolean };
 
+/** Tooltip for a toggle whose kind the chat lacks. */
+const ABSENT: Record<keyof Filters, string> = {
+  tools: "This chat has no tool calls",
+  thinking: "This chat has no readable thinking. Codex, for example, stores its reasoning encrypted.",
+  system: "This chat has no system messages",
+};
+
 /** Messages per request when the chat view loads the messages near the view. */
 const PAGE = 100;
 
@@ -240,6 +247,17 @@ export function Transcript({
   const topRow = virtualRows.find((v) => v.end > scrollTop + 24);
   const topIdx = topRow ? rows[topRow.index] : null;
 
+  // Which kinds this chat has. A toggle for a kind that the chat lacks would do nothing, so it is
+  // disabled. Codex, for example, often stores its reasoning encrypted, with no text to show.
+  const present = useMemo(
+    () => ({
+      tools: items.some((m) => m.kind === "tool_use" || m.kind === "tool_result"),
+      thinking: items.some((m) => m.kind === "thinking" && m.text.trim() !== ""),
+      system: items.some((m) => m.role === "system"),
+    }),
+    [items],
+  );
+
   const exportMarkdown = async () => {
     if (!outline) return;
     try {
@@ -275,8 +293,13 @@ export function Transcript({
         </div>
         <div className="toggles">
           {(Object.keys(filters) as (keyof Filters)[]).map((k) => (
-            <label key={k}>
-              <input type="checkbox" checked={filters[k]} onChange={(e) => setFilters({ ...filters, [k]: e.target.checked })} />
+            <label key={k} className={present[k] ? undefined : "disabled"} title={present[k] ? undefined : ABSENT[k]}>
+              <input
+                type="checkbox"
+                checked={filters[k]}
+                disabled={!present[k]}
+                onChange={(e) => setFilters({ ...filters, [k]: e.target.checked })}
+              />
               {k}
             </label>
           ))}
