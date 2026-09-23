@@ -105,10 +105,9 @@ fn push_item(out: &mut Vec<Message>, item: &Value, ts: Option<String>) {
             out.push(Message::new(role, "text", text, ts));
         }
         Some("reasoning") => {
-            let text = flatten_text(&item["summary"]);
-            if !text.trim().is_empty() {
-                out.push(Message::new("assistant", "thinking", text, ts));
-            }
+            // Reasoning without a summary is encrypted. The empty block still marks when
+            // thinking happened, which the timeline needs.
+            out.push(Message::new("assistant", "thinking", flatten_text(&item["summary"]), ts));
         }
         Some("function_call") | Some("custom_tool_call") => {
             let mut m = Message::new("assistant", "tool_use", "", ts);

@@ -14,6 +14,9 @@ use crate::sources;
 /// Cap on tool output copied into the full-text index (the full text is still stored).
 const FTS_TOOL_RESULT_CHARS: usize = 4000;
 
+/// Raise this when the parsers change what they store. The next scan then parses every log again.
+const PARSE_VERSION: i64 = 1;
+
 pub fn data_dir() -> PathBuf {
     std::env::var_os("RECEIPTS_HOME")
         .map(PathBuf::from)
@@ -65,6 +68,13 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
              tokenize = 'porter unicode61'
          );",
     )?;
+    // An mtime of -1 never matches a file, so the next scan parses every log again. Logs that the
+    // agents already deleted keep their old parse.
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < PARSE_VERSION {
+        conn.execute("UPDATE sessions SET mtime = -1", [])?;
+        conn.pragma_update(None, "user_version", PARSE_VERSION)?;
+    }
     Ok(conn)
 }
 

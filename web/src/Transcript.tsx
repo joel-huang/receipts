@@ -83,7 +83,9 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
   const { session, messages } = data;
   const visible = (m: Message, i: number) =>
     i === focusIdx ||
-    ((filters.tools || (m.kind !== "tool_use" && m.kind !== "tool_result")) &&
+    // Empty thinking blocks only mark time for the timeline. They have nothing to read.
+    (!(m.kind === "thinking" && !m.text.trim()) &&
+      (filters.tools || (m.kind !== "tool_use" && m.kind !== "tool_result")) &&
       (filters.thinking || m.kind !== "thinking") &&
       (filters.system || m.role !== "system"));
 

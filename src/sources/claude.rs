@@ -109,12 +109,11 @@ fn push_content(out: &mut Vec<Message>, role: &str, content: &Value, ts: Option<
                     out.push(Message::new(role, "text", text, ts.clone()));
                 }
             }
-            Some("thinking") => {
-                // Thinking may be redacted to an empty string with only a signature.
+            Some("thinking") | Some("redacted_thinking") => {
+                // Claude Code often stores thinking as an empty string with only a signature. The
+                // empty block still marks when thinking happened, which the timeline needs.
                 let text = b["thinking"].as_str().unwrap_or_default();
-                if !text.trim().is_empty() {
-                    out.push(Message::new(role, "thinking", text, ts.clone()));
-                }
+                out.push(Message::new(role, "thinking", text, ts.clone()));
             }
             Some("tool_use") | Some("server_tool_use") => {
                 let mut m = Message::new(role, "tool_use", "", ts.clone());
