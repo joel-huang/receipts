@@ -47,6 +47,8 @@ export type Status = {
   last_indexed_at: number | null;
   sessions: number;
   db_path: string;
+  /** SSH target when `receipts remote` started this server, such as "devbox". */
+  remote?: string | null;
 };
 
 async function get<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {

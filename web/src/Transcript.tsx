@@ -3,10 +3,22 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Message, type Session } from "./api";
 import { compactNumber, toolSummary } from "./format";
+import { RemoteIcon } from "./RemoteIcon";
 
 type Filters = { tools: boolean; thinking: boolean; system: boolean };
 
-export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: number | null; version: number }) {
+export function Transcript({
+  id,
+  focusIdx,
+  version,
+  remote,
+}: {
+  id: string;
+  focusIdx: number | null;
+  version: number;
+  /** SSH target when the chats come from another machine. */
+  remote?: string | null;
+}) {
   const [data, setData] = useState<{ session: Session; messages: Message[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>(() => {
@@ -95,7 +107,12 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
         <h1>{session.title ?? "(untitled)"}</h1>
         <div className="meta">
           <span className={`badge ${session.source}`}>{session.source}</span>
-          {session.project && <span title="Working directory">{session.project}</span>}
+          {session.project && (
+            <span title="Working directory">
+              <RemoteIcon remote={remote} />
+              {session.project}
+            </span>
+          )}
           {session.git_branch && <span>⎇ {session.git_branch}</span>}
           {session.model && <span>{session.model}</span>}
           <span>

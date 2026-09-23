@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Facet, type SearchHit, type Session, type Status } from "./api";
 import { compactNumber, relativeTime, shortProject } from "./format";
+import { RemoteIcon } from "./RemoteIcon";
 import { Transcript } from "./Transcript";
 
 /** How often the app asks the server to rescan the agent logs. */
@@ -142,6 +143,7 @@ export function App() {
               <FacetButton
                 key={f.name}
                 label={shortProject(f.name)}
+                icon={<RemoteIcon remote={status?.remote} />}
                 title={f.name}
                 count={f.count}
                 active={project === f.name}
@@ -182,7 +184,8 @@ export function App() {
                     <Highlighted text={h.snippet} />
                   </div>
                   <div className="row-meta">
-                    {h.role} · {shortProject(h.project)} · {relativeTime(h.updated_at)}
+                    {h.role} · <RemoteIcon remote={status?.remote} />
+                    {shortProject(h.project)} · {relativeTime(h.updated_at)}
                   </div>
                 </button>
               ))
@@ -197,6 +200,7 @@ export function App() {
                     <span className="row-title">{s.title ?? "(untitled)"}</span>
                   </div>
                   <div className="row-meta">
+                    <RemoteIcon remote={status?.remote} />
                     {shortProject(s.project)} · {s.message_count} msgs ·{" "}
                     {compactNumber(s.input_tokens + s.output_tokens)} tok · {relativeTime(s.updated_at)}
                     {!s.available && <span title="The agent deleted this log; Receipts kept a copy."> · archived</span>}
@@ -214,7 +218,12 @@ export function App() {
 
       <main className="detail">
         {selected ? (
-          <Transcript id={selected} focusIdx={focusIdx ? Number(focusIdx) : null} version={version} />
+          <Transcript
+            id={selected}
+            focusIdx={focusIdx ? Number(focusIdx) : null}
+            version={version}
+            remote={status?.remote}
+          />
         ) : (
           <div className="empty center">Select a session to review it.</div>
         )}
@@ -230,11 +239,15 @@ function FacetButton(props: {
   onClick: () => void;
   title?: string;
   badge?: string;
+  icon?: React.ReactNode;
 }) {
   return (
     <button className={`facet ${props.active ? "active" : ""}`} onClick={props.onClick} title={props.title}>
       {props.badge && <span className={`dot ${props.badge}`} />}
-      <span className="facet-label">{props.label}</span>
+      <span className="facet-label">
+        {props.icon}
+        {props.label}
+      </span>
       {props.count !== undefined && <span className="count">{props.count}</span>}
     </button>
   );

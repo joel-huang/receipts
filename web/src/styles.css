@@ -58,6 +58,7 @@ nav { flex: 1; overflow-y: auto; padding: 0 8px; display: flex; flex-direction: 
 .refresh:hover { background: var(--border); color: var(--text); }
 .refresh.spinning svg { animation: spin 0.5s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.remote-icon { display: inline-flex; vertical-align: -1px; margin-right: 4px; color: var(--muted); }
 .link { color: var(--accent); font-size: 12px; }
 .link:hover { text-decoration: underline; }
 .muted { color: var(--muted); }
