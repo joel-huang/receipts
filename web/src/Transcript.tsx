@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Message, type Session } from "./api";
@@ -25,9 +25,57 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
     api.session(id).then(setData).catch((e) => setError(String(e)));
   }, [id, version]);
 
+  // Scroll to a search hit once. Background refreshes reload `data`, and they must not scroll the chat.
+  const scrolledTo = useRef<string | null>(null);
   useEffect(() => {
+    const key = `${id}:${focusIdx}`;
+    if (!data || data.session.id !== id || focusIdx === null || scrolledTo.current === key) return;
     focusRef.current?.scrollIntoView({ block: "center" });
-  }, [data, focusIdx]);
+    scrolledTo.current = key;
+  }, [data, id, focusIdx]);
+
+  // Track whether the chat is scrolled to the bottom. The ref holds the value from before the
+  // latest render, so the layout effect below can tell where the reader was before new messages.
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    const content = messagesRef.current;
+    if (!scroller || !content) return;
+    const check = () => {
+      const bottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+      atBottomRef.current = bottom;
+      setAtBottom(bottom);
+    };
+    check();
+    scroller.addEventListener("scroll", check, { passive: true });
+    // Content height changes when messages arrive or when a filter hides blocks.
+    const resize = new ResizeObserver(check);
+    resize.observe(content);
+    return () => {
+      scroller.removeEventListener("scroll", check);
+      resize.disconnect();
+    };
+  }, [data?.session.id]);
+
+  // When a refresh adds messages: stay pinned if the reader was at the bottom, else wiggle the button.
+  const seenCount = useRef<{ id: string; count: number } | null>(null);
+  const [wiggle, setWiggle] = useState(0);
+  useLayoutEffect(() => {
+    if (!data) return;
+    const prev = seenCount.current;
+    seenCount.current = { id: data.session.id, count: data.messages.length };
+    if (!prev || prev.id !== data.session.id || data.messages.length <= prev.count) return;
+    const scroller = scrollRef.current;
+    if (atBottomRef.current && scroller) scroller.scrollTop = scroller.scrollHeight;
+    else setWiggle((w) => w + 1);
+  }, [data]);
+
+  const scrollToBottom = () => {
+    const scroller = scrollRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  };
 
   if (error) return <div className="error">{error}</div>;
   if (!data || data.session.id !== id) return <div className="empty center">Loading…</div>;
@@ -70,21 +118,38 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
       </header>
       <div className="transcript-body">
         <ChatNav messages={messages} scrollRef={scrollRef} />
-        <div className="transcript-scroll" ref={scrollRef}>
-          <div className="messages">
-            {messages.map((m, i) =>
-              visible(m, i) ? (
-                <div
-                  key={i}
-                  id={`msg-${i}`}
-                  ref={i === focusIdx ? focusRef : undefined}
-                  className={i === focusIdx ? "focused" : undefined}
-                >
-                  <MessageView m={m} />
-                </div>
-              ) : null,
-            )}
+        <div className="transcript-main">
+          <div className="transcript-scroll" ref={scrollRef}>
+            <div className="messages" ref={messagesRef}>
+              {messages.map((m, i) =>
+                visible(m, i) ? (
+                  <div
+                    key={i}
+                    id={`msg-${i}`}
+                    ref={i === focusIdx ? focusRef : undefined}
+                    className={i === focusIdx ? "focused" : undefined}
+                  >
+                    <MessageView m={m} />
+                  </div>
+                ) : null,
+              )}
+            </div>
           </div>
+          {!atBottom && (
+            <button
+              // A new key remounts the button, which replays the wiggle animation.
+              key={wiggle}
+              className={`scroll-down ${wiggle ? "wiggle" : ""}`}
+              onClick={scrollToBottom}
+              title="Scroll to the latest message"
+              aria-label="Scroll to the latest message"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 5v14" />
+                <path d="m19 12-7 7-7-7" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
     </div>

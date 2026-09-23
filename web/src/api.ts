@@ -38,7 +38,16 @@ export type SearchHit = {
   updated_at: string | null;
 };
 
-export type Status = { version: string; indexing: boolean; sessions: number; db_path: string };
+export type Status = {
+  version: string;
+  indexing: boolean;
+  /** Counts scans that changed data. */
+  generation: number;
+  /** Unix time in milliseconds when the last scan finished. */
+  last_indexed_at: number | null;
+  sessions: number;
+  db_path: string;
+};
 
 async function get<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
   const qs = new URLSearchParams();

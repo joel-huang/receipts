@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -24,6 +25,10 @@ struct AppState {
     db_path: PathBuf,
     conn: Mutex<Connection>,
     indexing: AtomicBool,
+    /// Counts scans that changed data. The web app reloads its views when this number changes.
+    generation: AtomicU64,
+    /// Unix time in milliseconds when the last scan finished. 0 means no scan has finished yet.
+    last_indexed_at: AtomicU64,
 }
 
 type Shared = Arc<AppState>;
@@ -49,6 +54,8 @@ pub async fn serve(db_path: PathBuf, host: String, port: u16, open_browser: bool
         conn: Mutex::new(index::open(&db_path)?),
         db_path,
         indexing: AtomicBool::new(false),
+        generation: AtomicU64::new(0),
+        last_indexed_at: AtomicU64::new(0),
     });
 
     // Serve immediately; index in the background so the UI fills in as it goes.
@@ -118,8 +125,14 @@ fn spawn_reindex(state: Shared) -> bool {
     tokio::task::spawn_blocking(move || {
         let result = index::open(&state.db_path).and_then(|mut c| index::reindex(&mut c));
         match result {
-            Ok(r) if r.updated > 0 => eprintln!("receipts: indexed {} of {} sessions", r.updated, r.scanned),
-            Ok(_) => {}
+            Ok(r) => {
+                if r.updated > 0 {
+                    state.generation.fetch_add(1, Ordering::SeqCst);
+                    eprintln!("receipts: indexed {} of {} sessions", r.updated, r.scanned);
+                }
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                state.last_indexed_at.store(now, Ordering::SeqCst);
+            }
             Err(e) => eprintln!("receipts: indexing failed: {e}"),
         }
         state.indexing.store(false, Ordering::SeqCst);
@@ -133,6 +146,11 @@ async fn status(State(s): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "indexing": s.indexing.load(Ordering::SeqCst),
+        "generation": s.generation.load(Ordering::SeqCst),
+        "last_indexed_at": match s.last_indexed_at.load(Ordering::SeqCst) {
+            0 => None,
+            ms => Some(ms),
+        },
         "sessions": sessions,
         "db_path": s.db_path,
     })))
