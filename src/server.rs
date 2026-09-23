@@ -273,6 +273,10 @@ async fn search(State(s): State<Shared>, Query(p): Query<SearchParams>) -> ApiRe
 }
 
 pub(crate) async fn static_asset(req: Request) -> Response {
+    // An unknown API path is an error, not a page. The web app then knows that the server is older.
+    if req.uri().path().starts_with("/api/") {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response();
+    }
     let path = req.uri().path().trim_start_matches('/');
     // Unknown non-asset paths fall back to index.html (client-side routing).
     let (file, name) = match Assets::get(path) {
