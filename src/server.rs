@@ -120,6 +120,7 @@ pub async fn serve(
 }
 
 async fn list_machines(State(s): State<Shared>) -> Json<Vec<machines::MachineInfo>> {
+    s.machines.first_check().await;
     Json(s.machines.list())
 }
 

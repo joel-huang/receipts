@@ -44,19 +44,20 @@ export function App() {
 
   // Check the machines every 30 seconds, and every second while the picked one connects.
   const connecting = current?.link === "connecting";
+  const loadMachines = useCallback(() => {
+    api
+      .machines()
+      .then((list) => {
+        setMachines(list);
+        setListed(true);
+      })
+      .catch(() => setListed(true));
+  }, []);
   useEffect(() => {
-    const load = () =>
-      api
-        .machines()
-        .then((list) => {
-          setMachines(list);
-          setListed(true);
-        })
-        .catch(() => setListed(true));
-    load();
-    const timer = setInterval(load, connecting ? 1000 : 30_000);
+    loadMachines();
+    const timer = setInterval(loadMachines, connecting ? 1000 : 30_000);
     return () => clearInterval(timer);
-  }, [connecting]);
+  }, [connecting, loadMachines]);
 
   const connect = useCallback((name: string) => {
     api
@@ -88,6 +89,7 @@ export function App() {
       machines={machines}
       version={version}
       onSelect={(name) => update({ host: name, s: null, m: null, q: null, source: null, project: null })}
+      onOpen={loadMachines}
     />
   );
   if (!ready) {
@@ -128,6 +130,7 @@ function MachineSelector(props: {
   machines: MachineInfo[];
   version: string | undefined;
   onSelect: (name: string | null) => void;
+  onOpen: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -160,7 +163,16 @@ function MachineSelector(props: {
   );
   return (
     <div className="machine-selector" ref={ref}>
-      <button className="machine-current" onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="menu">
+      <button
+        className="machine-current"
+        onClick={() => {
+          // Check the list again, so the menu shows the machines that answer now.
+          if (!open) props.onOpen();
+          setOpen(!open);
+        }}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
         <MachineAvatar name={props.host} />
         <span className="machine-name">{props.host ?? LOCAL}</span>
         <svg className="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -172,7 +184,6 @@ function MachineSelector(props: {
           <div className="machine-menu-label">Machines</div>
           {item(null, "")}
           {available.map((m) => item(m.name, m.link === "connected" ? "connected" : osName(m.detail)))}
-          {available.length === 0 && <div className="machine-empty">No other machines answer over SSH</div>}
           {props.version && <div className="machine-menu-footer">Receipts v{props.version}</div>}
         </div>
       )}

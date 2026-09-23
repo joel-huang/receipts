@@ -65,6 +65,8 @@ pub struct MachineInfo {
 pub struct Machines {
     machines: Mutex<HashMap<String, Machine>>,
     client: Client<HttpConnector, Body>,
+    /// Becomes true when the first check has finished.
+    checked: tokio::sync::watch::Sender<bool>,
 }
 
 pub type SharedMachines = Arc<Machines>;
@@ -74,6 +76,7 @@ impl Machines {
         Arc::new(Machines {
             machines: Mutex::new(HashMap::new()),
             client: Client::builder(TokioExecutor::new()).build_http(),
+            checked: tokio::sync::watch::channel(false).0,
         })
     }
 
@@ -84,6 +87,7 @@ impl Machines {
             loop {
                 let m = machines.clone();
                 let _ = tokio::task::spawn_blocking(move || m.check_all()).await;
+                machines.checked.send_replace(true);
                 tokio::time::sleep(CHECK_EVERY).await;
             }
         });
@@ -117,6 +121,13 @@ impl Machines {
                 }
             }
         }
+    }
+
+    /// Waits until the first check has finished, so that the first list says which machines
+    /// answer. The wait ends after `CHECK_TIMEOUT` and a little more, like the check itself.
+    pub async fn first_check(&self) {
+        let mut checked = self.checked.subscribe();
+        let _ = tokio::time::timeout(CHECK_TIMEOUT + Duration::from_secs(1), checked.wait_for(|done| *done)).await;
     }
 
     pub fn list(&self) -> Vec<MachineInfo> {
