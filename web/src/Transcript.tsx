@@ -233,11 +233,24 @@ function ChatNav({ messages, scrollRef }: { messages: Message[]; scrollRef: RefO
   );
 }
 
-type Turn = { idx: number; prompt: string; start: number; end: number };
+type PartKind = "think" | "reply" | "tool";
+type Part = { kind: PartKind; start: number; end: number };
+type Turn = { idx: number; prompt: string; start: number; end: number; parts: Part[] };
+
+const PART_LABELS: Record<PartKind, string> = { think: "thinking", reply: "response", tool: "tool calls" };
+
+/** Logs record when a message was written, so the time before a message counts as that message's kind. */
+function partKind(m: Message): PartKind | null {
+  if (m.kind === "thinking") return "think";
+  if (m.kind === "tool_use" || m.kind === "tool_result") return "tool";
+  if (m.role === "assistant") return "reply";
+  return null;
+}
 
 /**
  * Splits a chat into agent turns. A turn starts at a user prompt and ends at the last message
  * before the next prompt. The time between a turn's end and the next prompt is idle time.
+ * Each turn is further split into thinking, response and tool call parts.
  */
 function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: number } | null {
   const turns: Turn[] = [];
@@ -251,15 +264,28 @@ function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: n
     end = Math.max(end, t);
     if (isPrompt(m)) {
       if (current) turns.push(current);
-      current = { idx, prompt: m.text, start: t, end: t };
-    } else if (current) {
-      current.end = Math.max(current.end, t);
+      current = { idx, prompt: m.text, start: t, end: t, parts: [] };
+      return;
     }
+    if (!current || t <= current.end) return;
+    const last = current.parts[current.parts.length - 1];
+    // Other messages, such as a slash command, extend the part before them.
+    const kind = partKind(m) ?? last?.kind;
+    if (kind && last?.kind === kind) last.end = t;
+    else if (kind) current.parts.push({ kind, start: current.end, end: t });
+    current.end = t;
   });
   if (current) turns.push(current);
   if (!Number.isFinite(start) || end <= start) return null;
   // A prompt without any agent message has no work to show.
   return { turns: turns.filter((t) => t.end > t.start), start, end };
+}
+
+/** Total time for each part kind, in the fixed legend order. */
+function partTotals(turns: Turn[]) {
+  const totals: Record<PartKind, number> = { think: 0, reply: 0, tool: 0 };
+  for (const t of turns) for (const p of t.parts) totals[p.kind] += p.end - p.start;
+  return totals;
 }
 
 function formatDuration(ms: number) {
@@ -273,56 +299,126 @@ function formatDuration(ms: number) {
 
 const toIso = (ms: number) => new Date(ms).toISOString();
 
+/** Pills narrower than this grow to it, so short turns stay visible and clickable. */
+const MIN_PILL_PX = 6;
+/** Pills closer than this merge, so they never overlap and separate pills keep a visible gap. */
+const PILL_GAP_PX = 2;
+
+type Pill = { turns: Turn[]; start: number; end: number; left: number; right: number };
+
+function mainKind(totals: Record<PartKind, number>): PartKind {
+  return (Object.entries(totals) as [PartKind, number][]).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+}
+
 /**
- * Wall-clock timeline of the chat. Filled segments are agent turns in the agent's color; the gaps
- * are idle time. Each segment shows a tooltip on hover or focus, and a click jumps to its prompt.
+ * Wall-clock timeline of the chat. Filled pills are agent turns in shades of the agent's color;
+ * the gaps are idle time. Each pill shows a tooltip on hover or focus, and a click jumps to its
+ * first prompt.
  */
 function Timeline({ messages, source, onJump }: { messages: Message[]; source: string; onJump: (idx: number) => void }) {
   const [hover, setHover] = useState<number | null>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const track = trackRef.current;
+    if (!track) return;
+    const resize = new ResizeObserver(() => setWidth(track.clientWidth));
+    resize.observe(track);
+    return () => resize.disconnect();
+  }, []);
+
   const data = agentTurns(messages);
   if (!data) return null;
   const { turns, start, end } = data;
   const span = end - start;
-  const pct = (t: number) => ((t - start) / span) * 100;
+  const px = (t: number) => ((t - start) / span) * width;
   const working = turns.reduce((sum, t) => sum + (t.end - t.start), 0);
-  const shown = hover === null ? null : turns[hover];
+
+  // Merge turns whose pills would touch or overlap at the current width.
+  const pills: Pill[] = [];
+  for (const t of turns) {
+    const left = px(t.start);
+    const right = Math.max(px(t.end), left + MIN_PILL_PX);
+    const last = pills[pills.length - 1];
+    if (last && left < last.right + PILL_GAP_PX) {
+      last.turns.push(t);
+      last.end = t.end;
+      last.right = Math.max(last.right, right);
+    } else {
+      pills.push({ turns: [t], start: t.start, end: t.end, left, right });
+    }
+  }
+  const shown = hover === null ? null : pills[hover];
+  const shownWork = shown ? shown.turns.reduce((sum, t) => sum + (t.end - t.start), 0) : 0;
 
   return (
     <div className="timeline" style={{ ["--agent" as string]: `var(--${source}, var(--muted))` }}>
-      <span className="timeline-time">{clockTime(toIso(start))}</span>
-      <div className="timeline-track" onPointerLeave={() => setHover(null)}>
-        {turns.map((t, i) => (
-          <button
-            key={t.idx}
-            className="timeline-hit"
-            style={{ left: `${pct(t.start)}%`, width: `${pct(t.end) - pct(t.start)}%` }}
-            onPointerEnter={() => setHover(i)}
-            onFocus={() => setHover(i)}
-            onBlur={() => setHover(null)}
-            onClick={() => onJump(t.idx)}
-            aria-label={`Agent worked ${formatDuration(t.end - t.start)}, ${clockTime(toIso(t.start))} to ${clockTime(toIso(t.end))}`}
-          >
-            <span className={`timeline-seg ${hover === i ? "active" : ""}`} />
-          </button>
-        ))}
-        {shown && (
-          <div className="timeline-tip" style={{ left: `${Math.min(88, Math.max(12, pct((shown.start + shown.end) / 2)))}%` }}>
-            <strong>{formatDuration(shown.end - shown.start)}</strong>
-            <span>
-              {clockTime(toIso(shown.start))}–{clockTime(toIso(shown.end))}
-            </span>
-            <span className="timeline-tip-prompt">{shown.prompt}</span>
-          </div>
-        )}
+      <div className="timeline-row">
+        <span className="timeline-time">{clockTime(toIso(start))}</span>
+        <div className="timeline-track" ref={trackRef} onPointerLeave={() => setHover(null)}>
+          {width > 0 &&
+            pills.map((pill, i) => (
+              <button
+                key={pill.turns[0].idx}
+                className="timeline-hit"
+                style={{ left: pill.left, width: pill.right - pill.left }}
+                onPointerEnter={() => setHover(i)}
+                onFocus={() => setHover(i)}
+                onBlur={() => setHover(null)}
+                onClick={() => onJump(pill.turns[0].idx)}
+                aria-label={`Agent worked ${formatDuration(pill.turns.reduce((sum, t) => sum + (t.end - t.start), 0))}, ${clockTime(toIso(pill.start))} to ${clockTime(toIso(pill.end))}`}
+              >
+                <span className={`timeline-seg part-${mainKind(partTotals(pill.turns))} ${hover === i ? "active" : ""}`}>
+                  {pill.turns.flatMap((t) =>
+                    t.parts.map((p) => (
+                      <span
+                        key={`${t.idx}:${p.start}`}
+                        className={`timeline-part part-${p.kind}`}
+                        style={{ left: px(p.start) - pill.left, width: px(p.end) - px(p.start) }}
+                      />
+                    )),
+                  )}
+                </span>
+              </button>
+            ))}
+          {shown && (
+            <div className="timeline-tip" style={{ left: `${Math.min(88, Math.max(12, ((shown.left + shown.right) / 2 / width) * 100))}%` }}>
+              <strong>{formatDuration(shownWork)}</strong>
+              <span>
+                {clockTime(toIso(shown.start))}–{clockTime(toIso(shown.end))}
+              </span>
+              <span className="timeline-tip-prompt">{shown.turns[0].prompt}</span>
+              {shown.turns.length > 1 && <span>and {shown.turns.length - 1} more prompts</span>}
+              {(Object.entries(partTotals(shown.turns)) as [PartKind, number][])
+                .filter(([, ms]) => ms > 0)
+                .map(([kind, ms]) => (
+                  <span key={kind} className="timeline-tip-row">
+                    <i className={`key-line part-${kind}`} />
+                    <b>{formatDuration(ms)}</b> {PART_LABELS[kind]}
+                  </span>
+                ))}
+            </div>
+          )}
+        </div>
+        <span className="timeline-time">
+          {new Date(start).toDateString() === new Date(end).toDateString()
+            ? clockTime(toIso(end))
+            : `${new Date(end).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${clockTime(toIso(end))}`}
+        </span>
       </div>
-      <span className="timeline-time">
-        {new Date(start).toDateString() === new Date(end).toDateString()
-          ? clockTime(toIso(end))
-          : `${new Date(end).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${clockTime(toIso(end))}`}
-      </span>
-      <span className="timeline-total">
-        {formatDuration(working)} working of {formatDuration(span)}
-      </span>
+      <div className="timeline-row timeline-foot">
+        <span className="timeline-legend">
+          {(Object.entries(partTotals(turns)) as [PartKind, number][]).map(([kind, ms]) => (
+            <span key={kind}>
+              <i className={`key-rect part-${kind}`} />
+              {PART_LABELS[kind]} {formatDuration(ms)}
+            </span>
+          ))}
+        </span>
+        <span className="timeline-total">
+          {formatDuration(working)} working of {formatDuration(span)}
+        </span>
+      </div>
     </div>
   );
 }
