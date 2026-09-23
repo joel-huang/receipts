@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
+use base64::Engine;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode, Uri};
@@ -26,17 +27,23 @@ use hyper_util::rt::TokioExecutor;
 
 use crate::{server, update};
 
-const INSTALL_URL: &str = "https://github.com/joel-huang/receipts/releases/latest/download/install.sh";
+const INSTALL_SH: &str = "https://github.com/joel-huang/receipts/releases/latest/download/install.sh";
+const INSTALL_PS1: &str = "https://github.com/joel-huang/receipts/releases/latest/download/install.ps1";
 
-/// Finds receipts on the remote machine. Non-interactive SSH shells often lack ~/.local/bin, where
-/// the installer puts it, in their PATH.
-const FIND_RECEIPTS: &str = r#"R=$(command -v receipts || echo "$HOME/.local/bin/receipts")"#;
+/// Finds receipts on a POSIX machine. Non-interactive SSH shells often lack ~/.local/bin, where
+/// install.sh puts it, in their PATH.
+const FIND_POSIX: &str = r#"R=$(command -v receipts || echo "$HOME/.local/bin/receipts")"#;
+
+/// Finds receipts on a Windows machine. install.ps1 puts it in %LOCALAPPDATA%\receipts\bin.
+const FIND_POWERSHELL: &str = r#"$R = (Get-Command receipts -ErrorAction SilentlyContinue).Source; if (-not $R) { $R = Join-Path $env:LOCALAPPDATA 'receipts\bin\receipts.exe' }"#;
 
 struct Ssh {
     target: String,
     /// Extra options from the user, such as `-p 2222`.
     args: Vec<String>,
     control_path: PathBuf,
+    /// The remote machine runs Windows, so remote commands must be PowerShell.
+    windows: bool,
 }
 
 impl Ssh {
@@ -69,6 +76,23 @@ impl Ssh {
         Ok(status.success())
     }
 
+    /// Picks the POSIX or the PowerShell version of a remote command. The PowerShell version runs
+    /// through `powershell -EncodedCommand`, which works whether the SSH server starts
+    /// PowerShell or cmd.exe, and which needs no quoting.
+    fn script(&self, posix: String, powershell: String) -> String {
+        if !self.windows {
+            return posix;
+        }
+        // Without a terminal, PowerShell writes progress bars and Write-Host messages to stderr as
+        // CLIXML. Turn off progress bars, and send Write-Host output (stream 6) to stdout as text.
+        let powershell = format!("$ProgressPreference = 'SilentlyContinue'; & {{ {powershell} }} 6>&1");
+        let utf16: Vec<u8> = powershell.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        format!(
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+            base64::engine::general_purpose::STANDARD.encode(utf16)
+        )
+    }
+
     /// Closes the shared SSH connection.
     fn close(&self) {
         let _ = self
@@ -83,12 +107,17 @@ impl Ssh {
 }
 
 pub async fn run(target: String, ssh_args: Vec<String>, port: u16, open_browser: bool) -> anyhow::Result<()> {
-    let ssh = Ssh {
+    let mut ssh = Ssh {
         target,
         args: ssh_args,
         control_path: std::env::temp_dir().join(format!("receipts-ssh-{}", std::process::id())),
+        windows: false,
     };
-    let result = serve_remote(&ssh, port, open_browser).await;
+    let result = async {
+        ssh.windows = detect_windows(&ssh)?;
+        serve_remote(&ssh, port, open_browser).await
+    }
+    .await;
     ssh.close();
     result
 }
@@ -98,13 +127,20 @@ async fn serve_remote(ssh: &Ssh, port: u16, open_browser: bool) -> anyhow::Resul
     let version = ensure_remote_version(ssh)?;
     eprintln!("receipts: {target} has receipts {version}");
 
-    // -tt gives the remote command a terminal, so it stops when this SSH session ends.
+    // On POSIX, -tt gives the remote command a terminal, so it stops when this SSH session ends.
+    // Windows OpenSSH ends the session's processes itself, and a Windows terminal session would
+    // mix screen control codes into the output that read_remote_port reads.
     // RECEIPTS_NO_UPDATE keeps the remote update prompt from waiting for an answer.
-    let mut server = ssh
-        .command()
-        .arg("-tt")
+    let mut server = ssh.command();
+    if !ssh.windows {
+        server.arg("-tt");
+    }
+    let mut server = server
         .arg(target)
-        .arg(format!(r#"{FIND_RECEIPTS}; RECEIPTS_NO_UPDATE=1 exec "$R" serve --no-open"#))
+        .arg(ssh.script(
+            format!(r#"{FIND_POSIX}; RECEIPTS_NO_UPDATE=1 exec "$R" serve --no-open"#),
+            format!(r#"{FIND_POWERSHELL}; $env:RECEIPTS_NO_UPDATE = '1'; & $R serve --no-open"#),
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -177,7 +213,11 @@ fn ensure_remote_version(ssh: &Ssh) -> anyhow::Result<String> {
         Some(v) if older(&v, local) => {
             eprintln!("receipts: updating receipts on {target} from {v} to match {local}");
             // `receipts update` exists from 0.1.1 on. Older versions need the installer.
-            if !ssh.run(&format!(r#"{FIND_RECEIPTS}; "$R" update"#))? {
+            let update = ssh.script(
+                format!(r#"{FIND_POSIX}; "$R" update"#),
+                format!(r#"{FIND_POWERSHELL}; & $R update; exit $LASTEXITCODE"#),
+            );
+            if !ssh.run(&update)? {
                 install_remote(ssh)?;
             }
             remote_version(ssh)?.unwrap_or(v)
@@ -194,9 +234,23 @@ fn older(version: &str, than: &str) -> bool {
     matches!((update::parse_version(version), update::parse_version(than)), (Some(a), Some(b)) if a < b)
 }
 
+/// Tells a Windows machine from a POSIX one. PowerShell prints `Windows_NT` for this command,
+/// cmd.exe prints it unchanged, and a POSIX shell prints `:OS`.
+fn detect_windows(ssh: &Ssh) -> anyhow::Result<bool> {
+    let out = ssh.output("echo $env:OS")?;
+    if !out.status.success() {
+        bail!("could not connect to {} over ssh", ssh.target);
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text.contains("Windows_NT") || text.trim() == "$env:OS")
+}
+
 /// Returns the remote receipts version, such as "0.2.3", or None if it is not installed.
 fn remote_version(ssh: &Ssh) -> anyhow::Result<Option<String>> {
-    let out = ssh.output(&format!(r#"{FIND_RECEIPTS}; if [ -x "$R" ]; then "$R" --version; else echo MISSING; fi"#))?;
+    let out = ssh.output(&ssh.script(
+        format!(r#"{FIND_POSIX}; if [ -x "$R" ]; then "$R" --version; else echo MISSING; fi"#),
+        format!(r#"{FIND_POWERSHELL}; if (Test-Path $R) {{ & $R --version }} else {{ 'MISSING' }}"#),
+    ))?;
     if !out.status.success() {
         bail!("could not connect to {} over ssh", ssh.target);
     }
@@ -205,13 +259,13 @@ fn remote_version(ssh: &Ssh) -> anyhow::Result<Option<String>> {
     Ok((text != "MISSING" && !text.is_empty()).then(|| text.trim_start_matches("receipts ").to_string()))
 }
 
-/// Installs receipts on the remote machine with the curl installer.
+/// Installs receipts on the remote machine with install.sh, or with install.ps1 on Windows.
 fn install_remote(ssh: &Ssh) -> anyhow::Result<()> {
-    if !ssh.run(&format!("curl -fsSL {INSTALL_URL} | sh"))? {
-        bail!(
-            "the install on {} failed. Install it there with: curl -fsSL {INSTALL_URL} | sh",
-            ssh.target
-        );
+    let posix = format!("curl -fsSL {INSTALL_SH} | sh");
+    let powershell = format!("irm {INSTALL_PS1} | iex");
+    let manual = if ssh.windows { &powershell } else { &posix };
+    if !ssh.run(&ssh.script(posix.clone(), powershell.clone()))? {
+        bail!("the install on {} failed. Install it there with: {manual}", ssh.target);
     }
     Ok(())
 }
