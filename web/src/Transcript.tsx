@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Message, type Session } from "./api";
@@ -14,6 +14,7 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
     return saved ? JSON.parse(saved) : { tools: true, thinking: true, system: false };
   });
   const focusRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     localStorage.setItem("receipts.filters", JSON.stringify(filters));
@@ -39,7 +40,7 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
       (filters.system || m.role !== "system"));
 
   return (
-    <div className="transcript">
+    <div className="transcript-layout">
       <header className="transcript-header">
         <h1>{session.title ?? "(untitled)"}</h1>
         <div className="meta">
@@ -67,16 +68,99 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
           </button>
         </div>
       </header>
-      <div className="messages">
-        {messages.map((m, i) =>
-          visible(m, i) ? (
-            <div key={i} ref={i === focusIdx ? focusRef : undefined} className={i === focusIdx ? "focused" : undefined}>
-              <MessageView m={m} />
-            </div>
-          ) : null,
-        )}
+      <div className="transcript-body">
+        <ChatNav messages={messages} scrollRef={scrollRef} />
+        <div className="transcript-scroll" ref={scrollRef}>
+          <div className="messages">
+            {messages.map((m, i) =>
+              visible(m, i) ? (
+                <div
+                  key={i}
+                  id={`msg-${i}`}
+                  ref={i === focusIdx ? focusRef : undefined}
+                  className={i === focusIdx ? "focused" : undefined}
+                >
+                  <MessageView m={m} />
+                </div>
+              ) : null,
+            )}
+          </div>
+        </div>
       </div>
     </div>
+  );
+}
+
+/** The panel lists user prompts. Claude Code writes slash commands as "<command-name>…", so the panel skips those. */
+function isPrompt(m: Message) {
+  return m.role === "user" && m.kind === "text" && !m.text.trimStart().startsWith("<");
+}
+
+/** Formats a timestamp as local 24-hour HH:MM. Some messages have no timestamp, and they get an empty string. */
+function clockTime(iso: string | null) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+
+function ChatNav({ messages, scrollRef }: { messages: Message[]; scrollRef: RefObject<HTMLDivElement | null> }) {
+  const prompts = messages.flatMap((m, i) => (isPrompt(m) ? [{ idx: i, text: m.text, time: clockTime(m.timestamp) }] : []));
+  const [active, setActive] = useState<number | null>(prompts[0]?.idx ?? null);
+  const navRef = useRef<HTMLElement>(null);
+
+  // Highlight the last prompt that has scrolled past the top of the messages area.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const top = scroller.getBoundingClientRect().top + 24;
+      let current = prompts[0]?.idx ?? null;
+      for (const p of prompts) {
+        const el = document.getElementById(`msg-${p.idx}`);
+        if (el && el.getBoundingClientRect().top <= top) current = p.idx;
+      }
+      setActive(current);
+    };
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    update();
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", onScroll);
+      cancelAnimationFrame(frame);
+    };
+    // React rebuilds `prompts` on every render, so the effect depends on `messages` instead.
+  }, [messages, scrollRef]);
+
+  // Keep the highlighted item visible when a long chat scrolls it out of the panel.
+  useEffect(() => {
+    navRef.current?.querySelector(".nav-item.active")?.scrollIntoView({ block: "nearest" });
+  }, [active]);
+
+  const jump = (idx: number) => {
+    const scroller = scrollRef.current;
+    const el = document.getElementById(`msg-${idx}`);
+    if (!scroller || !el) return;
+    scroller.scrollTo({ top: el.offsetTop - 12 });
+  };
+
+  return (
+    <nav className="chat-nav" ref={navRef}>
+      {prompts.map((p) => (
+        <button
+          key={p.idx}
+          className={`nav-item ${active === p.idx ? "active" : ""}`}
+          onClick={() => jump(p.idx)}
+          title={p.text.slice(0, 500)}
+        >
+          <span className="nav-time">{p.time}</span>
+          <span className="nav-text">{p.text}</span>
+        </button>
+      ))}
+      {prompts.length === 0 && <div className="muted nav-empty">No prompts in this chat.</div>}
+    </nav>
   );
 }
 
