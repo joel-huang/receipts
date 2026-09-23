@@ -395,6 +395,29 @@ function clockTime(iso: string | null) {
   return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
+/** Local calendar day of a timestamp, such as "2026-09-24". Messages without a time get "". */
+function dayKey(iso: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** Header text for a day: "Today", "Yesterday", or a date such as "Tue, Sep 22". */
+function dayLabel(key: string) {
+  const [y, m, d] = key.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (key === dayKey(today.toISOString())) return "Today";
+  if (key === dayKey(yesterday.toISOString())) return "Yesterday";
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: y === today.getFullYear() ? undefined : "numeric",
+  });
+}
+
 function ChatNav({
   messages,
   topIdx,
@@ -405,7 +428,16 @@ function ChatNav({
   topIdx: number | null;
   onJump: (idx: number) => void;
 }) {
-  const prompts = messages.flatMap((m, i) => (isPrompt(m) ? [{ idx: i, text: m.text, time: clockTime(m.timestamp) }] : []));
+  const prompts = messages.flatMap((m, i) =>
+    isPrompt(m) ? [{ idx: i, text: m.text, time: clockTime(m.timestamp), day: dayKey(m.timestamp) }] : [],
+  );
+  // Prompts grouped by local day, in order. Each day gets a header that sticks while its prompts scroll.
+  const days: { day: string; prompts: typeof prompts }[] = [];
+  for (const p of prompts) {
+    const last = days[days.length - 1];
+    if (last && last.day === p.day) last.prompts.push(p);
+    else days.push({ day: p.day, prompts: [p] });
+  }
   // Highlight the last prompt at or above the top of the chat view.
   let active = prompts[0]?.idx ?? null;
   if (topIdx !== null) for (const p of prompts) if (p.idx <= topIdx) active = p.idx;
@@ -420,16 +452,21 @@ function ChatNav({
 
   return (
     <nav className="chat-nav" ref={navRef}>
-      {prompts.map((p) => (
-        <button
-          key={p.idx}
-          className={`nav-item ${active === p.idx ? "active" : ""}`}
-          onClick={() => jump(p.idx)}
-          title={p.text.slice(0, 500)}
-        >
-          <span className="nav-time">{p.time}</span>
-          <span className="nav-text">{p.text}</span>
-        </button>
+      {days.map((d) => (
+        <section key={d.prompts[0].idx} className="nav-day">
+          {d.day && <div className="nav-day-header">{dayLabel(d.day)}</div>}
+          {d.prompts.map((p) => (
+            <button
+              key={p.idx}
+              className={`nav-item ${active === p.idx ? "active" : ""}`}
+              onClick={() => jump(p.idx)}
+              title={p.text.slice(0, 500)}
+            >
+              <span className="nav-time">{p.time}</span>
+              <span className="nav-text">{p.text}</span>
+            </button>
+          ))}
+        </section>
       ))}
       {prompts.length === 0 && <div className="muted nav-empty">No prompts in this chat.</div>}
     </nav>
