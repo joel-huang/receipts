@@ -115,6 +115,7 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
             Export Markdown
           </button>
         </div>
+        <Timeline messages={messages} source={session.source} onJump={(idx) => scrollToMessage(scrollRef.current, idx)} />
       </header>
       <div className="transcript-body">
         <ChatNav messages={messages} scrollRef={scrollRef} />
@@ -154,6 +155,12 @@ export function Transcript({ id, focusIdx, version }: { id: string; focusIdx: nu
       </div>
     </div>
   );
+}
+
+/** Scrolls the chat so that message `idx` sits just below the top of the messages area. */
+function scrollToMessage(scroller: HTMLElement | null, idx: number) {
+  const el = document.getElementById(`msg-${idx}`);
+  if (scroller && el) scroller.scrollTo({ top: el.offsetTop - 12 });
 }
 
 /** The panel lists user prompts. Claude Code writes slash commands as "<command-name>…", so the panel skips those. */
@@ -204,12 +211,7 @@ function ChatNav({ messages, scrollRef }: { messages: Message[]; scrollRef: RefO
     navRef.current?.querySelector(".nav-item.active")?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
-  const jump = (idx: number) => {
-    const scroller = scrollRef.current;
-    const el = document.getElementById(`msg-${idx}`);
-    if (!scroller || !el) return;
-    scroller.scrollTo({ top: el.offsetTop - 12 });
-  };
+  const jump = (idx: number) => scrollToMessage(scrollRef.current, idx);
 
   return (
     <nav className="chat-nav" ref={navRef}>
@@ -226,6 +228,100 @@ function ChatNav({ messages, scrollRef }: { messages: Message[]; scrollRef: RefO
       ))}
       {prompts.length === 0 && <div className="muted nav-empty">No prompts in this chat.</div>}
     </nav>
+  );
+}
+
+type Turn = { idx: number; prompt: string; start: number; end: number };
+
+/**
+ * Splits a chat into agent turns. A turn starts at a user prompt and ends at the last message
+ * before the next prompt. The time between a turn's end and the next prompt is idle time.
+ */
+function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: number } | null {
+  const turns: Turn[] = [];
+  let start = Infinity;
+  let end = -Infinity;
+  let current: Turn | null = null;
+  messages.forEach((m, idx) => {
+    const t = m.timestamp ? Date.parse(m.timestamp) : NaN;
+    if (Number.isNaN(t)) return;
+    start = Math.min(start, t);
+    end = Math.max(end, t);
+    if (isPrompt(m)) {
+      if (current) turns.push(current);
+      current = { idx, prompt: m.text, start: t, end: t };
+    } else if (current) {
+      current.end = Math.max(current.end, t);
+    }
+  });
+  if (current) turns.push(current);
+  if (!Number.isFinite(start) || end <= start) return null;
+  // A prompt without any agent message has no work to show.
+  return { turns: turns.filter((t) => t.end > t.start), start, end };
+}
+
+function formatDuration(ms: number) {
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  return mins % 60 ? `${hours}h ${mins % 60}m` : `${hours}h`;
+}
+
+const toIso = (ms: number) => new Date(ms).toISOString();
+
+/**
+ * Wall-clock timeline of the chat. Filled segments are agent turns in the agent's color; the gaps
+ * are idle time. Each segment shows a tooltip on hover or focus, and a click jumps to its prompt.
+ */
+function Timeline({ messages, source, onJump }: { messages: Message[]; source: string; onJump: (idx: number) => void }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const data = agentTurns(messages);
+  if (!data) return null;
+  const { turns, start, end } = data;
+  const span = end - start;
+  const pct = (t: number) => ((t - start) / span) * 100;
+  const working = turns.reduce((sum, t) => sum + (t.end - t.start), 0);
+  const shown = hover === null ? null : turns[hover];
+
+  return (
+    <div className="timeline" style={{ ["--agent" as string]: `var(--${source}, var(--muted))` }}>
+      <span className="timeline-time">{clockTime(toIso(start))}</span>
+      <div className="timeline-track" onPointerLeave={() => setHover(null)}>
+        {turns.map((t, i) => (
+          <button
+            key={t.idx}
+            className="timeline-hit"
+            style={{ left: `${pct(t.start)}%`, width: `${pct(t.end) - pct(t.start)}%` }}
+            onPointerEnter={() => setHover(i)}
+            onFocus={() => setHover(i)}
+            onBlur={() => setHover(null)}
+            onClick={() => onJump(t.idx)}
+            aria-label={`Agent worked ${formatDuration(t.end - t.start)}, ${clockTime(toIso(t.start))} to ${clockTime(toIso(t.end))}`}
+          >
+            <span className={`timeline-seg ${hover === i ? "active" : ""}`} />
+          </button>
+        ))}
+        {shown && (
+          <div className="timeline-tip" style={{ left: `${Math.min(88, Math.max(12, pct((shown.start + shown.end) / 2)))}%` }}>
+            <strong>{formatDuration(shown.end - shown.start)}</strong>
+            <span>
+              {clockTime(toIso(shown.start))}–{clockTime(toIso(shown.end))}
+            </span>
+            <span className="timeline-tip-prompt">{shown.prompt}</span>
+          </div>
+        )}
+      </div>
+      <span className="timeline-time">
+        {new Date(start).toDateString() === new Date(end).toDateString()
+          ? clockTime(toIso(end))
+          : `${new Date(end).toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${clockTime(toIso(end))}`}
+      </span>
+      <span className="timeline-total">
+        {formatDuration(working)} working of {formatDuration(span)}
+      </span>
+    </div>
   );
 }
 
