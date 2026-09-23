@@ -55,6 +55,9 @@ cargo run -- serve --no-open                       # API + embedded UI on :7878
 
 # UI with hot reload (proxies /api to :7878):
 cd web && npm run dev
+
+# Share the dev server on your tailnet at https://<machine>.<tailnet>.ts.net:
+tailscale serve --bg 5173
 ```
 
 ### Layout
