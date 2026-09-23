@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, type ReactNode, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Message, type Session } from "./api";
@@ -32,10 +32,47 @@ export function Transcript({
     localStorage.setItem("receipts.filters", JSON.stringify(filters));
   }, [filters]);
 
+  // Load the chat once, then fetch only the messages after the ones already loaded. A large chat
+  // is tens of megabytes, too much to download again on every refresh.
+  const loaded = useRef<{ id: string; count: number } | null>(null);
   useEffect(() => {
-    setError(null);
-    api.session(id).then(setData).catch((e) => setError(String(e)));
+    let cancelled = false;
+    const after = loaded.current?.id === id ? loaded.current.count : 0;
+    (async () => {
+      let page = await api.session(id, after);
+      // The chat got shorter than what is loaded, so load it again from the start.
+      if (page.total < after) page = await api.session(id, 0);
+      if (cancelled) return;
+      setError(null);
+      setData((prev) => {
+        const keep = prev && prev.session.id === id ? prev.messages.slice(0, page.offset) : [];
+        const messages = page.offset === 0 ? page.messages : [...keep, ...page.messages];
+        loaded.current = { id, count: messages.length };
+        return { session: page.session, messages };
+      });
+    })().catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
   }, [id, version]);
+
+  // Replace a shortened message with its full text when its block opens.
+  const expand = useCallback(
+    (idx: number) => {
+      api
+        .message(id, idx)
+        .then((full) =>
+          setData((prev) => {
+            if (!prev || prev.session.id !== id) return prev;
+            const messages = prev.messages.slice();
+            messages[idx] = full;
+            return { ...prev, messages };
+          }),
+        )
+        .catch((e) => setError(String(e)));
+    },
+    [id],
+  );
 
   // Scroll to a search hit once. Background refreshes reload `data`, and they must not scroll the chat.
   const scrolledTo = useRef<string | null>(null);
@@ -80,14 +117,11 @@ export function Transcript({
     seenCount.current = { id: data.session.id, count: data.messages.length };
     if (!prev || prev.id !== data.session.id || data.messages.length <= prev.count) return;
     const scroller = scrollRef.current;
-    if (atBottomRef.current && scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (atBottomRef.current && scroller) scrollToEnd(scroller);
     else setWiggle((w) => w + 1);
   }, [data]);
 
-  const scrollToBottom = () => {
-    const scroller = scrollRef.current;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
-  };
+  const scrollToBottom = () => scrollToEnd(scrollRef.current);
 
   if (error) return <div className="error">{error}</div>;
   if (!data || data.session.id !== id) return <div className="empty center">Loading…</div>;
@@ -149,7 +183,7 @@ export function Transcript({
                     ref={i === focusIdx ? focusRef : undefined}
                     className={i === focusIdx ? "focused" : undefined}
                   >
-                    <MessageView m={m} />
+                    <MessageView m={m} idx={i} onExpand={expand} />
                   </div>
                 ) : null,
               )}
@@ -179,7 +213,29 @@ export function Transcript({
 /** Scrolls the chat so that message `idx` sits just below the top of the messages area. */
 function scrollToMessage(scroller: HTMLElement | null, idx: number) {
   const el = document.getElementById(`msg-${idx}`);
-  if (scroller && el) scroller.scrollTo({ top: el.offsetTop - 12 });
+  if (!scroller || !el) return;
+  settleScroll(scroller, () => el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 12);
+}
+
+/** Scrolls the chat to its last message. */
+function scrollToEnd(scroller: HTMLElement | null) {
+  if (scroller) settleScroll(scroller, () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
+}
+
+/**
+ * Scrolls by `distance()` until the distance is zero. Content that renders after the scroll, such
+ * as a block that loads its full text, can move the target. This corrects for that over a few
+ * frames.
+ */
+function settleScroll(scroller: HTMLElement, distance: () => number) {
+  let frames = 0;
+  const step = () => {
+    const d = distance();
+    if (Math.abs(d) < 1 || frames++ > 10) return;
+    scroller.scrollTop += d;
+    requestAnimationFrame(step);
+  };
+  step();
 }
 
 /**
@@ -488,38 +544,87 @@ function Timeline({ messages, source, onJump }: { messages: Message[]; source: s
   );
 }
 
-function MessageView({ m }: { m: Message }) {
+/**
+ * A collapsed block that renders its contents only while open, so a chat with thousands of
+ * blocks does not render them all. Opening a shortened block loads its full text.
+ */
+function Collapsible(props: {
+  className: string;
+  summary: ReactNode;
+  truncated: boolean | undefined;
+  onOpen: () => void;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className={props.className}
+      onToggle={(e) => {
+        const isOpen = e.currentTarget.open;
+        setOpen(isOpen);
+        if (isOpen && props.truncated) props.onOpen();
+      }}
+    >
+      <summary>{props.summary}</summary>
+      {open && props.children}
+      {open && props.truncated && <div className="loading-full">Loading the full text…</div>}
+    </details>
+  );
+}
+
+/** Memoized, so that appending new messages does not render the existing ones again. */
+const MessageView = memo(function MessageView({
+  m,
+  idx,
+  onExpand,
+}: {
+  m: Message;
+  idx: number;
+  onExpand: (idx: number) => void;
+}) {
+  const open = () => onExpand(idx);
   if (m.kind === "tool_use") {
     const summary = toolSummary(m.tool_name, m.tool_input);
     return (
-      <details className="tool">
-        <summary>
-          <span className="tool-name">{m.tool_name}</span> <code className="tool-summary">{summary}</code>
-        </summary>
+      <Collapsible
+        className="tool"
+        truncated={m.truncated}
+        onOpen={open}
+        summary={
+          <>
+            <span className="tool-name">{m.tool_name}</span> <code className="tool-summary">{summary}</code>
+          </>
+        }
+      >
         <pre>{typeof m.tool_input === "string" ? m.tool_input : JSON.stringify(m.tool_input, null, 2)}</pre>
-      </details>
+      </Collapsible>
     );
   }
   if (m.kind === "tool_result") {
     const firstLine = m.text.split("\n").find((l) => l.trim()) ?? "(empty)";
     return (
-      <details className={`tool result ${m.is_error ? "error-result" : ""}`}>
-        <summary>
-          <span className="tool-name">{m.is_error ? "error" : "result"}</span>{" "}
-          <code className="tool-summary">{firstLine.slice(0, 160)}</code>
-        </summary>
+      <Collapsible
+        className={`tool result ${m.is_error ? "error-result" : ""}`}
+        truncated={m.truncated}
+        onOpen={open}
+        summary={
+          <>
+            <span className="tool-name">{m.is_error ? "error" : "result"}</span>{" "}
+            <code className="tool-summary">{firstLine.slice(0, 160)}</code>
+          </>
+        }
+      >
         <pre>{m.text}</pre>
-      </details>
+      </Collapsible>
     );
   }
   if (m.kind === "thinking") {
     return (
-      <details className="thinking">
-        <summary>Thinking</summary>
+      <Collapsible className="thinking" truncated={m.truncated} onOpen={open} summary="Thinking">
         <div className="prose">
           <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
         </div>
-      </details>
+      </Collapsible>
     );
   }
   return (
@@ -533,7 +638,7 @@ function MessageView({ m }: { m: Message }) {
       </div>
     </div>
   );
-}
+});
 
 function download(session: Session, messages: Message[]) {
   const lines = [`# ${session.title ?? "Session"}`, "", `- Agent: ${session.source}`, `- Project: ${session.project ?? ""}`, ""];

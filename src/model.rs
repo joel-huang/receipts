@@ -30,6 +30,9 @@ pub struct Message {
     pub tool_input: Option<Value>,
     pub is_error: bool,
     pub timestamp: Option<String>,
+    /// The chat view got a shortened copy. The full message comes from its own endpoint.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 impl Message {
@@ -42,6 +45,7 @@ impl Message {
             tool_input: None,
             is_error: false,
             timestamp,
+            truncated: false,
         }
     }
 }

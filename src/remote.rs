@@ -347,6 +347,11 @@ async fn forward(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
     };
     // The remote server only answers loopback hostnames.
     parts.headers.insert(header::HOST, HeaderValue::from_str(&upstream).expect("valid host"));
+    // The status response gets a field added below, so it must arrive uncompressed. Other
+    // responses pass through compressed, which keeps them small over the SSH link.
+    if path == "/api/status" {
+        parts.headers.remove(header::ACCEPT_ENCODING);
+    }
 
     let resp = match proxy.client.request(Request::from_parts(parts, body)).await {
         Ok(resp) => resp,

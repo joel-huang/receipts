@@ -80,10 +80,13 @@ pub async fn serve(
         .route("/api/status", get(status))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}/messages/{idx}", get(get_message))
         .route("/api/facets", get(facets))
         .route("/api/search", get(search))
         .route("/api/reindex", post(reindex))
         .fallback(static_asset)
+        // Chat logs compress well, which matters over a slow link such as `receipts remote`.
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(middleware::from_fn_with_state(state.clone(), allowed_host_only))
         .with_state(state);
 
@@ -217,10 +220,28 @@ async fn list_sessions(State(s): State<Shared>, Query(p): Query<ListParams>) -> 
     Ok(Json(rows).into_response())
 }
 
-async fn get_session(State(s): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+#[derive(Deserialize)]
+struct SessionParams {
+    /// Return only messages from this position on. The web app uses it to fetch new messages.
+    after: Option<i64>,
+}
+
+async fn get_session(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(p): Query<SessionParams>,
+) -> ApiResult<Response> {
     let conn = s.conn.lock().unwrap();
-    Ok(match index::get_session(&conn, &id)? {
-        Some((session, messages)) => Json(json!({ "session": session, "messages": messages })).into_response(),
+    Ok(match index::get_session(&conn, &id, p.after.unwrap_or(0))? {
+        Some(page) => Json(page).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
+    })
+}
+
+async fn get_message(State(s): State<Shared>, Path((id, idx)): Path<(String, i64)>) -> ApiResult<Response> {
+    let conn = s.conn.lock().unwrap();
+    Ok(match index::get_message(&conn, &id, idx)? {
+        Some(m) => Json(m).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
     })
 }

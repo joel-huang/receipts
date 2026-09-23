@@ -170,6 +170,8 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .timeline-tip-prompt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text); }
 .timeline-total { white-space: nowrap; }
 
+.loading-full { padding: 6px 10px; color: var(--muted); font-size: 12px; }
+
 .messages { display: flex; flex-direction: column; gap: 10px; padding-top: 16px; max-width: 880px; margin: 0 auto; }
 .focused { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; }
 

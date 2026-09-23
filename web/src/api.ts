@@ -23,7 +23,12 @@ export type Message = {
   tool_input: unknown;
   is_error: boolean;
   timestamp: string | null;
+  /** The chat view got a shortened copy. `api.message` returns the full message. */
+  truncated?: boolean;
 };
+
+/** Part of a chat: the messages from `offset` on. `total` counts the whole chat. */
+export type SessionPage = { session: Session; total: number; offset: number; messages: Message[] };
 
 export type Facet = { name: string; count: number };
 
@@ -64,8 +69,11 @@ export const api = {
   facets: () => get<{ sources: Facet[]; projects: Facet[] }>("/api/facets"),
   sessions: (source?: string, project?: string) =>
     get<Session[]>("/api/sessions", { source, project, limit: "500" }),
-  session: (id: string) =>
-    get<{ session: Session; messages: Message[] }>(`/api/sessions/${encodeURIComponent(id)}`),
+  /** Messages from position `after` on, with long tool output shortened. */
+  session: (id: string, after = 0) =>
+    get<SessionPage>(`/api/sessions/${encodeURIComponent(id)}`, { after: after ? String(after) : undefined }),
+  /** One message in full. */
+  message: (id: string, idx: number) => get<Message>(`/api/sessions/${encodeURIComponent(id)}/messages/${idx}`),
   search: (q: string, source?: string) => get<SearchHit[]>("/api/search", { q, source }),
   reindex: () => fetch("/api/reindex", { method: "POST" }),
 };

@@ -216,32 +216,98 @@ pub fn list_sessions(conn: &Connection, f: &ListFilter) -> anyhow::Result<Vec<Se
     Ok(rows)
 }
 
-pub fn get_session(conn: &Connection, id: &str) -> anyhow::Result<Option<(SessionRow, Vec<Message>)>> {
+/// Most characters of each kind that the chat view gets. Tool output makes up most of a large
+/// chat, and its blocks start collapsed, so the view loads the rest when a block opens.
+const PREVIEW_TOOL_RESULT: i64 = 2_000;
+const PREVIEW_THINKING: i64 = 4_000;
+const PREVIEW_TEXT: i64 = 50_000;
+/// Longest string value inside a tool input in the chat view.
+const PREVIEW_INPUT_STRING: usize = 500;
+
+/// Part of a chat for the chat view: the messages from `offset` on, with long fields shortened.
+#[derive(Serialize)]
+pub struct SessionPage {
+    pub session: SessionRow,
+    /// Number of messages in the whole chat.
+    pub total: i64,
+    /// Position of the first message in `messages`.
+    pub offset: i64,
+    pub messages: Vec<Message>,
+}
+
+pub fn get_session(conn: &Connection, id: &str, after: i64) -> anyhow::Result<Option<SessionPage>> {
     let Some(session) = conn
         .query_row("SELECT * FROM sessions WHERE id = ?1", [id], row_to_session)
         .optional()?
     else {
         return Ok(None);
     };
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE session_id = ?1", [id], |r| r.get(0))?;
+    let offset = after.clamp(0, total);
     let mut stmt = conn.prepare(
-        "SELECT role, kind, text, tool_name, tool_input, is_error, timestamp
-         FROM messages WHERE session_id = ?1 ORDER BY idx",
+        "SELECT role, kind,
+                substr(text, 1, CASE kind WHEN 'tool_result' THEN ?3 WHEN 'thinking' THEN ?4 ELSE ?5 END),
+                length(text), tool_name, tool_input, is_error, timestamp
+         FROM messages WHERE session_id = ?1 AND idx >= ?2 ORDER BY idx",
     )?;
     let messages = stmt
-        .query_map([id], |r| {
-            let input: Option<String> = r.get(4)?;
+        .query_map(params![id, offset, PREVIEW_TOOL_RESULT, PREVIEW_THINKING, PREVIEW_TEXT], |r| {
+            let text: String = r.get(2)?;
+            let full_len: i64 = r.get(3)?;
+            let input: Option<String> = r.get(5)?;
+            let mut input: Option<Value> = input.and_then(|s| serde_json::from_str(&s).ok());
+            let input_cut = input.as_mut().is_some_and(|v| shorten_strings(v, PREVIEW_INPUT_STRING));
             Ok(Message {
+                truncated: (text.chars().count() as i64) < full_len || input_cut,
                 role: r.get(0)?,
                 kind: r.get(1)?,
-                text: r.get(2)?,
-                tool_name: r.get(3)?,
-                tool_input: input.and_then(|s| serde_json::from_str(&s).ok()),
-                is_error: r.get(5)?,
-                timestamp: r.get(6)?,
+                text,
+                tool_name: r.get(4)?,
+                tool_input: input,
+                is_error: r.get(6)?,
+                timestamp: r.get(7)?,
             })
         })?
         .collect::<Result<_, _>>()?;
-    Ok(Some((session, messages)))
+    Ok(Some(SessionPage { session, total, offset, messages }))
+}
+
+/// Shortens every string inside a JSON value to `max` characters. Returns true if it cut any.
+fn shorten_strings(v: &mut Value, max: usize) -> bool {
+    match v {
+        Value::String(s) if s.chars().count() > max => {
+            *s = s.chars().take(max).collect();
+            true
+        }
+        Value::Array(items) => items.iter_mut().fold(false, |cut, x| shorten_strings(x, max) | cut),
+        Value::Object(map) => map.values_mut().fold(false, |cut, x| shorten_strings(x, max) | cut),
+        _ => false,
+    }
+}
+
+/// One message in full, for a block that the chat view got shortened.
+pub fn get_message(conn: &Connection, id: &str, idx: i64) -> anyhow::Result<Option<Message>> {
+    let msg = conn
+        .query_row(
+            "SELECT role, kind, text, tool_name, tool_input, is_error, timestamp
+             FROM messages WHERE session_id = ?1 AND idx = ?2",
+            params![id, idx],
+            |r| {
+                let input: Option<String> = r.get(4)?;
+                Ok(Message {
+                    role: r.get(0)?,
+                    kind: r.get(1)?,
+                    text: r.get(2)?,
+                    tool_name: r.get(3)?,
+                    tool_input: input.and_then(|s| serde_json::from_str(&s).ok()),
+                    is_error: r.get(5)?,
+                    timestamp: r.get(6)?,
+                    truncated: false,
+                })
+            },
+        )
+        .optional()?;
+    Ok(msg)
 }
 
 #[derive(Serialize)]
