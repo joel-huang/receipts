@@ -165,9 +165,54 @@ function scrollToMessage(scroller: HTMLElement | null, idx: number) {
   if (scroller && el) scroller.scrollTo({ top: el.offsetTop - 12 });
 }
 
-/** The panel lists user prompts. Claude Code writes slash commands as "<command-name>…", so the panel skips those. */
+/**
+ * Tags that Claude Code writes into user messages itself, such as slash commands and background
+ * task notifications. A user message that starts with one of these is not a typed prompt. Other
+ * tags, such as <pasted_content>, come from the user.
+ */
+const AGENT_TAGS = [
+  "bash-input",
+  "bash-stderr",
+  "bash-stdout",
+  "command-args",
+  "command-message",
+  "command-name",
+  "local-command-caveat",
+  "local-command-stderr",
+  "local-command-stdout",
+  "persisted-output",
+  "system-reminder",
+  "task-notification",
+  "tool_use_error",
+  "user-memory-input",
+];
+
+/** Returns the agent tag that a message starts with, if any. */
+function agentTag(text: string): string | null {
+  const match = /^<([a-z_-]+)/.exec(text.trimStart());
+  return match && AGENT_TAGS.includes(match[1]) ? match[1] : null;
+}
+
+/** The navigation column lists prompts that the user typed. */
 function isPrompt(m: Message) {
-  return m.role === "user" && m.kind === "text" && !m.text.trimStart().startsWith("<");
+  return m.role === "user" && m.kind === "text" && agentTag(m.text) === null;
+}
+
+/**
+ * A turn of agent work starts at any user text. Besides typed prompts, that includes messages
+ * such as background task notifications, which also wake the agent.
+ */
+function isTurnStart(m: Message) {
+  return m.role === "user" && m.kind === "text";
+}
+
+/** Tooltip label for the message that started a turn. */
+function turnLabel(m: Message) {
+  const tag = agentTag(m.text);
+  if (tag === null) return m.text;
+  if (tag === "task-notification") return "background task notification";
+  if (tag.startsWith("command-")) return /<command-name>(.*?)<\/command-name>/.exec(m.text)?.[1] ?? "slash command";
+  return tag.replace(/[-_]/g, " ");
 }
 
 /** Formats a timestamp as local 24-hour HH:MM. Some messages have no timestamp, and they get an empty string. */
@@ -262,9 +307,9 @@ function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: n
     if (Number.isNaN(t)) return;
     start = Math.min(start, t);
     end = Math.max(end, t);
-    if (isPrompt(m)) {
+    if (isTurnStart(m)) {
       if (current) turns.push(current);
-      current = { idx, prompt: m.text, start: t, end: t, parts: [] };
+      current = { idx, prompt: turnLabel(m), start: t, end: t, parts: [] };
       return;
     }
     if (!current || t <= current.end) return;
@@ -392,7 +437,8 @@ function Timeline({ messages, source, onJump }: { messages: Message[]; source: s
               <span className="timeline-tip-prompt">{shown.turns[0].prompt}</span>
               {shown.turns.length > 1 && <span>and {shown.turns.length - 1} more prompts</span>}
               {(Object.entries(partTotals(shown.turns)) as [PartKind, number][])
-                .filter(([, ms]) => ms > 0)
+                // Hide kinds that would show as "0s".
+                .filter(([, ms]) => ms >= 500)
                 .map(([kind, ms]) => (
                   <span key={kind} className="timeline-tip-row">
                     <i className={`key-line part-${kind}`} />

@@ -15,7 +15,7 @@ use crate::sources;
 const FTS_TOOL_RESULT_CHARS: usize = 4000;
 
 /// Raise this when the parsers change what they store. The next scan then parses every log again.
-const PARSE_VERSION: i64 = 1;
+const PARSE_VERSION: i64 = 2;
 
 pub fn data_dir() -> PathBuf {
     std::env::var_os("RECEIPTS_HOME")

@@ -51,11 +51,37 @@ pub struct Parsed {
     pub messages: Vec<Message>,
 }
 
-/// Title fallback: first real user prompt, single line, truncated.
+/// Tags that agents write into user messages themselves, such as slash commands and background
+/// task notifications. Other tags, such as <pasted_content>, come from the user.
+const AGENT_TAGS: &[&str] = &[
+    "bash-input",
+    "bash-stderr",
+    "bash-stdout",
+    "command-args",
+    "command-message",
+    "command-name",
+    "local-command-caveat",
+    "local-command-stderr",
+    "local-command-stdout",
+    "persisted-output",
+    "system-reminder",
+    "task-notification",
+    "tool_use_error",
+    "user-memory-input",
+];
+
+/// True if the text is a prompt that the user typed, not a message that the agent wrote.
+pub fn is_typed_prompt(text: &str) -> bool {
+    let Some(rest) = text.trim_start().strip_prefix('<') else { return true };
+    let tag: String = rest.chars().take_while(|c| c.is_ascii_lowercase() || *c == '-' || *c == '_').collect();
+    !AGENT_TAGS.contains(&tag.as_str())
+}
+
+/// Title fallback: first typed user prompt, single line, truncated.
 pub fn derive_title(messages: &[Message]) -> Option<String> {
     messages
         .iter()
-        .find(|m| m.role == "user" && m.kind == "text" && !m.text.trim_start().starts_with('<'))
+        .find(|m| m.role == "user" && m.kind == "text" && is_typed_prompt(&m.text))
         .map(|m| {
             let line = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
             if line.chars().count() > 100 {
@@ -75,5 +101,18 @@ pub fn bump_times(meta: &mut SessionMeta, ts: &Option<String>) {
         if meta.updated_at.as_ref().is_none_or(|s| ts > s) {
             meta.updated_at = Some(ts.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_typed_prompt;
+
+    #[test]
+    fn tells_typed_prompts_from_agent_messages() {
+        assert!(is_typed_prompt("fix the bug"));
+        assert!(is_typed_prompt("  <pasted_content id=\"1\">\nsome text</pasted_content>"));
+        assert!(!is_typed_prompt("<command-name>/clear</command-name>"));
+        assert!(!is_typed_prompt("<task-notification>\n<task-id>1</task-id>"));
     }
 }
