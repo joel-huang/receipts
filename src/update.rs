@@ -97,7 +97,7 @@ fn is_newer(tag: &str) -> bool {
     matches!((parse_version(tag), parse_version(CURRENT)), (Some(latest), Some(current)) if latest > current)
 }
 
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+pub(crate) fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     // Pre-release suffixes like "1.2.0-beta" compare as "1.2.0".
     let mut parts = v
         .trim()

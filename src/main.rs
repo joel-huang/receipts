@@ -1,5 +1,6 @@
 mod index;
 mod model;
+mod remote;
 mod server;
 mod sources;
 mod update;
@@ -45,6 +46,20 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
+    /// Browse the chats on another machine over SSH, in this machine's browser
+    Remote {
+        /// SSH target, such as user@host or a Host from ~/.ssh/config
+        target: String,
+        /// Local port for the web UI
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// Don't open a browser window
+        #[arg(long)]
+        no_open: bool,
+        /// Extra ssh options after --, such as -- -p 2222 -i ~/.ssh/key
+        #[arg(last = true)]
+        ssh_args: Vec<String>,
+    },
     /// Print where Receipts stores its index
     Where,
     /// Update to the newest release from GitHub
@@ -84,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Remote { target, port, no_open, ssh_args } => remote::run(target, ssh_args, port, !no_open).await?,
         Command::Where => println!("{}", db_path.display()),
         Command::Update => update::update_command()?,
     }

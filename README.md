@@ -28,6 +28,7 @@ receipts                 # index, start the UI at http://127.0.0.1:7878 and open
 receipts serve --no-open --port 9000
 receipts search "migration rollback"
 receipts index           # index only
+receipts remote devbox   # browse the chats on another machine over SSH, in this browser
 receipts where           # print the database path
 receipts update          # update to the newest release
 ```
@@ -42,6 +43,11 @@ Set `RECEIPTS_NO_UPDATE=1` to turn the check off.
 | `CODEX_HOME` | `~/.codex` |
 | `RECEIPTS_NO_UPDATE` | unset (set it to turn off the update check) |
 | `RECEIPTS_HOME` | platform data dir (`~/Library/Application Support/receipts`, `~/.local/share/receipts`, `%APPDATA%\receipts`) |
+
+`receipts remote <target>` takes any SSH target, such as `user@host` or a `Host` from `~/.ssh/config`.
+It installs Receipts on that machine if needed, starts it there on `127.0.0.1`, and opens it here
+through an SSH tunnel. The remote chats stay on the remote machine. Extra SSH options go after
+`--`, such as `receipts remote devbox -- -p 2222`.
 
 The server binds to `127.0.0.1` and rejects any non-localhost `Host` header, which blocks DNS-rebinding attacks.
 

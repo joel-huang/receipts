@@ -105,7 +105,7 @@ pub async fn serve(
 }
 
 /// Try the requested port, then the next few, so a second instance still starts.
-async fn bind(host: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
+pub(crate) async fn bind(host: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> {
     let mut last_err = None;
     for p in port..port.saturating_add(20) {
         match tokio::net::TcpListener::bind((host, p)).await {
@@ -121,6 +121,14 @@ async fn bind(host: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> 
 /// read your chats. `--allow-host` adds names such as a Tailscale name, which such a page cannot
 /// make the browser send.
 async fn allowed_host_only(State(s): State<Shared>, req: Request, next: Next) -> Response {
+    match host_rejection(&req, &s.allowed_hosts) {
+        None => next.run(req).await,
+        Some(resp) => resp,
+    }
+}
+
+/// Returns a 403 response unless the Host header is loopback or one of `allowed`.
+pub(crate) fn host_rejection(req: &Request, allowed: &[String]) -> Option<Response> {
     let host = req
         .headers()
         .get(header::HOST)
@@ -132,11 +140,11 @@ async fn allowed_host_only(State(s): State<Shared>, req: Request, next: Next) ->
         host.split(':').next().unwrap_or("").to_string()
     };
     let hostname = hostname.trim_end_matches('.').to_lowercase();
-    if matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]") || s.allowed_hosts.contains(&hostname) {
-        next.run(req).await
+    if matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]") || allowed.contains(&hostname) {
+        None
     } else {
         let msg = format!("Receipts does not answer requests for {hostname}. Start it with --allow-host {hostname} to allow them.");
-        (StatusCode::FORBIDDEN, msg).into_response()
+        Some((StatusCode::FORBIDDEN, msg).into_response())
     }
 }
 
@@ -243,7 +251,7 @@ async fn search(State(s): State<Shared>, Query(p): Query<SearchParams>) -> ApiRe
     Ok(Json(hits).into_response())
 }
 
-async fn static_asset(req: Request) -> Response {
+pub(crate) async fn static_asset(req: Request) -> Response {
     let path = req.uri().path().trim_start_matches('/');
     // Unknown non-asset paths fall back to index.html (client-side routing).
     let (file, name) = match Assets::get(path) {
