@@ -74,7 +74,27 @@ export class ApiError extends Error {
   }
 }
 
+/** Machine from ~/.ssh/config, as the server sees it. */
+export type MachineInfo = {
+  name: string;
+  /** Whether its SSH server answered the last check. null means that the check could not tell. */
+  reachable: boolean | null;
+  /** SSH software, such as "OpenSSH_for_Windows_9.5", or why the check failed. */
+  detail: string | null;
+  link: "idle" | "connecting" | "connected" | "failed";
+  /** Connection progress or error. */
+  message: string | null;
+};
+
+/** API requests for another machine go through `/api/m/<machine>`, which forwards them over SSH. */
+let base = "/api";
+export function setMachine(host: string | null) {
+  base = host ? `/api/m/${encodeURIComponent(host)}` : "/api";
+}
+
 async function get<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
+  // Machine endpoints belong to this server, so they never go to another machine.
+  if (!path.startsWith("/api/machines")) path = base + path.slice("/api".length);
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
   const res = await fetch(`${path}${qs.size ? `?${qs}` : ""}`);
@@ -101,5 +121,11 @@ export const api = {
   /** One message in full. */
   message: (id: string, idx: number) => get<Message>(`/api/sessions/${encodeURIComponent(id)}/messages/${idx}`),
   search: (q: string, source?: string) => get<SearchHit[]>("/api/search", { q, source }),
-  reindex: () => fetch("/api/reindex", { method: "POST" }),
+  reindex: () => fetch(`${base}/reindex`, { method: "POST" }),
+  machines: () => get<MachineInfo[]>("/api/machines"),
+  connect: async (name: string) => {
+    const res = await fetch(`/api/machines/${encodeURIComponent(name)}/connect`, { method: "POST" });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    return (await res.json()) as MachineInfo;
+  },
 };

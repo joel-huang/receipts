@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type Facet, type SearchHit, type Session, type Status } from "./api";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { api, setMachine, type Facet, type MachineInfo, type SearchHit, type Session, type Status } from "./api";
 import { compactNumber, relativeTime, shortProject } from "./format";
 import { RemoteIcon } from "./RemoteIcon";
 import { Transcript } from "./Transcript";
@@ -28,7 +28,176 @@ function useHashParams(): [URLSearchParams, UpdateParams] {
   return [params, update];
 }
 
+/** Name of this computer in the machine selector. */
+const LOCAL = "This computer";
+
+/**
+ * Picks the machine whose chats the page shows. Another machine connects over SSH when it is
+ * picked, and its chats show once the connection is up.
+ */
 export function App() {
+  const [params, update] = useHashParams();
+  const host = params.get("host");
+  const [machines, setMachines] = useState<MachineInfo[]>([]);
+  const [listed, setListed] = useState(false);
+  const current = machines.find((m) => m.name === host);
+
+  // Check the machines every 30 seconds, and every second while the picked one connects.
+  const connecting = current?.link === "connecting";
+  useEffect(() => {
+    const load = () =>
+      api
+        .machines()
+        .then((list) => {
+          setMachines(list);
+          setListed(true);
+        })
+        .catch(() => setListed(true));
+    load();
+    const timer = setInterval(load, connecting ? 1000 : 30_000);
+    return () => clearInterval(timer);
+  }, [connecting]);
+
+  const connect = useCallback((name: string) => {
+    api
+      .connect(name)
+      .then((m) => setMachines((list) => list.map((x) => (x.name === m.name ? m : x))))
+      .catch(() => {});
+  }, []);
+
+  // Connect when a machine is picked. A failed connection waits for Retry.
+  useEffect(() => {
+    if (host && current?.link === "idle") connect(host);
+  }, [host, current?.link, connect]);
+
+  const ready = !host || current?.link === "connected";
+  // This server's version, for the switcher's footer.
+  const [version, setVersion] = useState<string>();
+  useEffect(() => {
+    fetch("/api/status")
+      .then((r) => r.json())
+      .then((s: Status) => setVersion(s.version))
+      .catch(() => {});
+  }, []);
+  // Children read the base path while they render, so set it first.
+  setMachine(ready ? host : null);
+
+  const selector = (
+    <MachineSelector
+      host={host}
+      machines={machines}
+      version={version}
+      onSelect={(name) => update({ host: name, s: null, m: null, q: null, source: null, project: null })}
+    />
+  );
+  if (!ready) {
+    return (
+      <div className="app">
+        <aside className="sidebar">{selector}</aside>
+        <section className="list" />
+        <main className="detail machine-status">
+          {!listed ? (
+            <div className="empty center">Loading machines…</div>
+          ) : !current ? (
+            <div className="empty center">{host} is not in ~/.ssh/config.</div>
+          ) : current.link === "failed" ? (
+            <div className="empty center">
+              <div>
+                <p className="error-text">{current.message}</p>
+                <button className="link" onClick={() => connect(current.name)}>
+                  Retry
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="empty center pulse">{current.message ?? `Connecting to ${host}`}…</div>
+          )}
+        </main>
+      </div>
+    );
+  }
+  return <Workspace key={host ?? LOCAL} selector={selector} />;
+}
+
+/**
+ * Machine switcher at the top of the sidebar, like a workspace switcher. It lists this computer
+ * and the machines whose SSH server answers.
+ */
+function MachineSelector(props: {
+  host: string | null;
+  machines: MachineInfo[];
+  version: string | undefined;
+  onSelect: (name: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const escape = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  const pick = (name: string | null) => {
+    setOpen(false);
+    if (name !== props.host) props.onSelect(name);
+  };
+  // Keep the picked and connected machines even if a check misses them.
+  const available = props.machines.filter((m) => m.reachable === true || m.link === "connected" || m.name === props.host);
+  const item = (name: string | null, detail: string) => (
+    <button key={name ?? LOCAL} className="machine-item" role="menuitem" onClick={() => pick(name)}>
+      <MachineAvatar name={name} />
+      <span className="machine-name">{name ?? LOCAL}</span>
+      <span className="machine-detail">{detail}</span>
+      <span className="machine-check">{props.host === name ? "✓" : ""}</span>
+    </button>
+  );
+  return (
+    <div className="machine-selector" ref={ref}>
+      <button className="machine-current" onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="menu">
+        <MachineAvatar name={props.host} />
+        <span className="machine-name">{props.host ?? LOCAL}</span>
+        <svg className="caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </button>
+      {open && (
+        <div className="machine-menu" role="menu">
+          <div className="machine-menu-label">Machines</div>
+          {item(null, "")}
+          {available.map((m) => item(m.name, m.link === "connected" ? "connected" : osName(m.detail)))}
+          {available.length === 0 && <div className="machine-empty">No other machines answer over SSH</div>}
+          {props.version && <div className="machine-menu-footer">Receipts v{props.version}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Square with the machine's first letter, in a color that stays the same for each name. */
+function MachineAvatar({ name }: { name: string | null }) {
+  const hue = name ? [...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7) : null;
+  return (
+    <span className="machine-avatar" style={hue === null ? undefined : { background: `oklch(0.6 0.12 ${hue})` }} aria-hidden="true">
+      {(name ?? LOCAL)[0].toUpperCase()}
+    </span>
+  );
+}
+
+/** Short OS name from an SSH greeting, such as "Windows" from "OpenSSH_for_Windows_9.5". */
+function osName(detail: string | null) {
+  if (!detail) return "";
+  for (const os of ["Windows", "Ubuntu", "Debian", "FreeBSD", "Raspbian"]) if (detail.includes(os)) return os;
+  return detail.startsWith("OpenSSH") ? "" : detail;
+}
+
+function Workspace({ selector }: { selector: ReactNode }) {
   const [params, update] = useHashParams();
   const source = params.get("source") ?? undefined;
   const project = params.get("project") ?? undefined;
@@ -119,10 +288,7 @@ export function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="brand">
-          Receipts
-          {status && <span className="muted version">v{status.version}</span>}
-        </div>
+        {selector}
         <nav>
           <div className="nav-label">Agents</div>
           <FacetButton label="All" count={total} active={!source} onClick={() => update({ source: null })} />
