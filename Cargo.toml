@@ -1,6 +1,6 @@
 [package]
 name = "receipts"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Review and explore your agentic chats across Claude Code, Codex and other agents"
 license = "MIT"
