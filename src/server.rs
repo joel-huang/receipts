@@ -23,6 +23,8 @@ struct Assets;
 
 struct AppState {
     db_path: PathBuf,
+    /// Hostnames besides loopback that the server answers, in lowercase.
+    allowed_hosts: Vec<String>,
     conn: Mutex<Connection>,
     indexing: AtomicBool,
     /// Counts scans that changed data. The web app reloads its views when this number changes.
@@ -49,8 +51,20 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub async fn serve(db_path: PathBuf, host: String, port: u16, open_browser: bool) -> anyhow::Result<()> {
+pub async fn serve(
+    db_path: PathBuf,
+    host: String,
+    port: u16,
+    open_browser: bool,
+    allowed_hosts: Vec<String>,
+) -> anyhow::Result<()> {
+    let allowed_hosts: Vec<String> = allowed_hosts
+        .iter()
+        .map(|h| h.trim().trim_end_matches('.').to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
     let state: Shared = Arc::new(AppState {
+        allowed_hosts,
         conn: Mutex::new(index::open(&db_path)?),
         db_path,
         indexing: AtomicBool::new(false),
@@ -61,6 +75,7 @@ pub async fn serve(db_path: PathBuf, host: String, port: u16, open_browser: bool
     // Serve immediately; index in the background so the UI fills in as it goes.
     spawn_reindex(state.clone());
 
+    let extra_hosts = state.allowed_hosts.clone();
     let app = Router::new()
         .route("/api/status", get(status))
         .route("/api/sessions", get(list_sessions))
@@ -69,12 +84,15 @@ pub async fn serve(db_path: PathBuf, host: String, port: u16, open_browser: bool
         .route("/api/search", get(search))
         .route("/api/reindex", post(reindex))
         .fallback(static_asset)
-        .layer(middleware::from_fn(local_host_only))
+        .layer(middleware::from_fn_with_state(state.clone(), allowed_host_only))
         .with_state(state);
 
     let listener = bind(&host, port).await?;
     let url = format!("http://{}", listener.local_addr()?);
     println!("Receipts running at {url}  (Ctrl+C to stop)");
+    for h in &extra_hosts {
+        println!("Also answering requests for {h}");
+    }
     if open_browser {
         let _ = open::that(&url);
     }
@@ -98,9 +116,11 @@ async fn bind(host: &str, port: u16) -> anyhow::Result<tokio::net::TcpListener> 
     Err(last_err.map(Into::into).unwrap_or_else(|| anyhow::anyhow!("no port available")))
 }
 
-/// Reject requests whose Host header isn't loopback. Blocks DNS-rebinding attacks
-/// where a malicious web page resolves its own hostname to 127.0.0.1 to read your chats.
-async fn local_host_only(req: Request, next: Next) -> Response {
+/// Reject requests whose Host header is neither loopback nor an allowed hostname. This blocks
+/// DNS-rebinding attacks, where a malicious web page resolves its own hostname to 127.0.0.1 to
+/// read your chats. `--allow-host` adds names such as a Tailscale name, which such a page cannot
+/// make the browser send.
+async fn allowed_host_only(State(s): State<Shared>, req: Request, next: Next) -> Response {
     let host = req
         .headers()
         .get(header::HOST)
@@ -111,10 +131,12 @@ async fn local_host_only(req: Request, next: Next) -> Response {
     } else {
         host.split(':').next().unwrap_or("").to_string()
     };
-    if matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]") {
+    let hostname = hostname.trim_end_matches('.').to_lowercase();
+    if matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "[::1]") || s.allowed_hosts.contains(&hostname) {
         next.run(req).await
     } else {
-        (StatusCode::FORBIDDEN, "Receipts only serves localhost").into_response()
+        let msg = format!("Receipts does not answer requests for {hostname}. Start it with --allow-host {hostname} to allow them.");
+        (StatusCode::FORBIDDEN, msg).into_response()
     }
 }
 

@@ -4,28 +4,37 @@ mod server;
 mod sources;
 mod update;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Receipts: review and explore your agentic chats across Claude Code, Codex and more.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// Options for the web UI when no command is given
+    #[command(flatten)]
+    serve: ServeArgs,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long, default_value_t = 7878, env = "RECEIPTS_PORT")]
+    port: u16,
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// Don't open a browser window
+    #[arg(long)]
+    no_open: bool,
+    /// Also accept requests for this hostname, such as a Tailscale name (repeatable)
+    #[arg(long = "allow-host", env = "RECEIPTS_ALLOW_HOSTS", value_delimiter = ',')]
+    allow_hosts: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Start the local web UI (default)
-    Serve {
-        #[arg(long, default_value_t = 7878, env = "RECEIPTS_PORT")]
-        port: u16,
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// Don't open a browser window
-        #[arg(long)]
-        no_open: bool,
-    },
+    Serve(ServeArgs),
     /// Index all agent sessions and exit
     Index,
     /// Full-text search across all sessions from the terminal
@@ -47,13 +56,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_path = index::data_dir().join("receipts.db");
 
-    let command = cli.command.unwrap_or(Command::Serve { port: 7878, host: "127.0.0.1".into(), no_open: false });
+    let command = cli.command.unwrap_or(Command::Serve(cli.serve));
     if !matches!(command, Command::Update) {
         update::auto_update();
     }
 
     match command {
-        Command::Serve { port, host, no_open } => server::serve(db_path, host, port, !no_open).await?,
+        Command::Serve(args) => server::serve(db_path, args.host, args.port, !args.no_open, args.allow_hosts).await?,
         Command::Index => {
             let mut conn = index::open(&db_path)?;
             let r = index::reindex(&mut conn)?;
