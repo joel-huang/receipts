@@ -73,7 +73,7 @@ pub async fn serve(
     });
 
     // Serve immediately; index in the background so the UI fills in as it goes.
-    spawn_reindex(state.clone());
+    spawn_reindex(state.clone(), true);
 
     let extra_hosts = state.allowed_hosts.clone();
     let app = Router::new()
@@ -140,7 +140,9 @@ async fn allowed_host_only(State(s): State<Shared>, req: Request, next: Next) ->
     }
 }
 
-fn spawn_reindex(state: Shared) -> bool {
+/// Scans the agent logs in the background. Only the scan at startup prints its count, because the
+/// web app requests a scan every few seconds and an active chat changes between them.
+fn spawn_reindex(state: Shared, report: bool) -> bool {
     if state.indexing.swap(true, Ordering::SeqCst) {
         return false;
     }
@@ -150,6 +152,8 @@ fn spawn_reindex(state: Shared) -> bool {
             Ok(r) => {
                 if r.updated > 0 {
                     state.generation.fetch_add(1, Ordering::SeqCst);
+                }
+                if report {
                     eprintln!("receipts: indexed {} of {} sessions", r.updated, r.scanned);
                 }
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
@@ -179,7 +183,7 @@ async fn status(State(s): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
 }
 
 async fn reindex(State(s): State<Shared>) -> Json<serde_json::Value> {
-    let started = spawn_reindex(s);
+    let started = spawn_reindex(s, false);
     Json(json!({ "started": started }))
 }
 
