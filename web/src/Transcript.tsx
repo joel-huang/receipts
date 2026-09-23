@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type Message, type Session } from "./api";
@@ -317,14 +317,16 @@ function mainKind(totals: Record<PartKind, number>): PartKind {
  */
 function Timeline({ messages, source, onJump }: { messages: Message[]; source: string; onJump: (idx: number) => void }) {
   const [hover, setHover] = useState<number | null>(null);
-  const trackRef = useRef<HTMLDivElement>(null);
+  // Measure the bar whenever it appears. A new chat may have only a prompt, and then the bar
+  // does not render yet, so a measurement at first render would find nothing.
   const [width, setWidth] = useState(0);
-  useEffect(() => {
-    const track = trackRef.current;
+  const observer = useRef<ResizeObserver | null>(null);
+  const trackRef = useCallback((track: HTMLDivElement | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
     if (!track) return;
-    const resize = new ResizeObserver(() => setWidth(track.clientWidth));
-    resize.observe(track);
-    return () => resize.disconnect();
+    observer.current = new ResizeObserver(() => setWidth(track.clientWidth));
+    observer.current.observe(track);
   }, []);
 
   const data = agentTurns(messages);
