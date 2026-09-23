@@ -12,4 +12,6 @@ fn main() {
         .expect("write placeholder index.html");
     }
     println!("cargo:rerun-if-changed=web/dist");
+    // The self-updater downloads the release archive that matches this target triple.
+    println!("cargo:rustc-env=RECEIPTS_TARGET={}", std::env::var("TARGET").unwrap());
 }

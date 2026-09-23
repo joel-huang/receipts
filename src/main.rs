@@ -2,6 +2,7 @@ mod index;
 mod model;
 mod server;
 mod sources;
+mod update;
 
 use clap::{Parser, Subcommand};
 
@@ -37,6 +38,8 @@ enum Command {
     },
     /// Print where Receipts stores its index
     Where,
+    /// Update to the newest release from GitHub
+    Update,
 }
 
 #[tokio::main]
@@ -44,7 +47,12 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let db_path = index::data_dir().join("receipts.db");
 
-    match cli.command.unwrap_or(Command::Serve { port: 7878, host: "127.0.0.1".into(), no_open: false }) {
+    let command = cli.command.unwrap_or(Command::Serve { port: 7878, host: "127.0.0.1".into(), no_open: false });
+    if !matches!(command, Command::Update) {
+        update::auto_update();
+    }
+
+    match command {
         Command::Serve { port, host, no_open } => server::serve(db_path, host, port, !no_open).await?,
         Command::Index => {
             let mut conn = index::open(&db_path)?;
@@ -68,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Where => println!("{}", db_path.display()),
+        Command::Update => update::update_command()?,
     }
     Ok(())
 }
