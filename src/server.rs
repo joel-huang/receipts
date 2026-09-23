@@ -80,6 +80,7 @@ pub async fn serve(
         .route("/api/status", get(status))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}/outline", get(get_outline))
         .route("/api/sessions/{id}/messages/{idx}", get(get_message))
         .route("/api/facets", get(facets))
         .route("/api/search", get(search))
@@ -222,8 +223,10 @@ async fn list_sessions(State(s): State<Shared>, Query(p): Query<ListParams>) -> 
 
 #[derive(Deserialize)]
 struct SessionParams {
-    /// Return only messages from this position on. The web app uses it to fetch new messages.
-    after: Option<i64>,
+    /// Return only messages from this position on.
+    from: Option<i64>,
+    /// Return at most this many messages. The web app loads long chats in pages.
+    limit: Option<i64>,
 }
 
 async fn get_session(
@@ -232,8 +235,21 @@ async fn get_session(
     Query(p): Query<SessionParams>,
 ) -> ApiResult<Response> {
     let conn = s.conn.lock().unwrap();
-    Ok(match index::get_session(&conn, &id, p.after.unwrap_or(0))? {
+    let limit = p.limit.unwrap_or(i64::MAX).max(1);
+    Ok(match index::get_session(&conn, &id, p.from.unwrap_or(0), limit)? {
         Some(page) => Json(page).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
+    })
+}
+
+async fn get_outline(
+    State(s): State<Shared>,
+    Path(id): Path<String>,
+    Query(p): Query<SessionParams>,
+) -> ApiResult<Response> {
+    let conn = s.conn.lock().unwrap();
+    Ok(match index::get_outline(&conn, &id, p.from.unwrap_or(0))? {
+        Some(outline) => Json(outline).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
     })
 }

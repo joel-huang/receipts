@@ -27,6 +27,14 @@ export type Message = {
   truncated?: boolean;
 };
 
+/** Every message of a chat in brief. See `api.outline`. */
+export type Outline = {
+  session: Session;
+  total: number;
+  offset: number;
+  items: [string | null, Message["role"], Message["kind"], string | null][];
+};
+
 /** Part of a chat: the messages from `offset` on. `total` counts the whole chat. */
 export type SessionPage = { session: Session; total: number; offset: number; messages: Message[] };
 
@@ -56,11 +64,23 @@ export type Status = {
   remote?: string | null;
 };
 
+/** An API request that failed. Status 404 means that the server lacks the route. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(`${status} ${message}`);
+  }
+}
+
 async function get<T>(path: string, params: Record<string, string | undefined> = {}): Promise<T> {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
   const res = await fetch(`${path}${qs.size ? `?${qs}` : ""}`);
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+  // A server that lacks a route answers with the web page instead of JSON.
+  if (!res.headers.get("content-type")?.includes("json")) throw new ApiError(404, `${path} is not available`);
   return res.json();
 }
 
@@ -69,9 +89,15 @@ export const api = {
   facets: () => get<{ sources: Facet[]; projects: Facet[] }>("/api/facets"),
   sessions: (source?: string, project?: string) =>
     get<Session[]>("/api/sessions", { source, project, limit: "500" }),
-  /** Messages from position `after` on, with long tool output shortened. */
-  session: (id: string, after = 0) =>
-    get<SessionPage>(`/api/sessions/${encodeURIComponent(id)}`, { after: after ? String(after) : undefined }),
+  /** Up to `limit` messages from position `from` on, with long tool output shortened. */
+  session: (id: string, from = 0, limit?: number) =>
+    get<SessionPage>(`/api/sessions/${encodeURIComponent(id)}`, {
+      from: from ? String(from) : undefined,
+      limit: limit ? String(limit) : undefined,
+    }),
+  /** Every message from position `from` on in brief: [timestamp, role, kind, text]. */
+  outline: (id: string, from = 0) =>
+    get<Outline>(`/api/sessions/${encodeURIComponent(id)}/outline`, { from: from ? String(from) : undefined }),
   /** One message in full. */
   message: (id: string, idx: number) => get<Message>(`/api/sessions/${encodeURIComponent(id)}/messages/${idx}`),
   search: (q: string, source?: string) => get<SearchHit[]>("/api/search", { q, source }),

@@ -1,11 +1,26 @@
-import { memo, type ReactNode, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { memo, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, type Message, type Session } from "./api";
+import { api, ApiError, type Message, type Outline, type Session } from "./api";
 import { compactNumber, toolSummary } from "./format";
 import { RemoteIcon } from "./RemoteIcon";
 
 type Filters = { tools: boolean; thinking: boolean; system: boolean };
+
+/** Messages per request when the chat view loads the messages near the view. */
+const PAGE = 100;
+
+/** Height guess for a message that has not rendered yet. The list corrects it after rendering. */
+function estimateHeight(m: Message | undefined) {
+  if (!m || m.kind !== "text") return 46;
+  return m.role === "user" ? 100 : 140;
+}
+
+/** Turns an outline item into a message with only the fields that the outline has. */
+function fromOutline([timestamp, role, kind, text]: Outline["items"][number]): Message {
+  return { role, kind, text: text ?? "", tool_name: null, tool_input: null, is_error: false, timestamp };
+}
 
 export function Transcript({
   id,
@@ -19,36 +34,57 @@ export function Transcript({
   /** SSH target when the chats come from another machine. */
   remote?: string | null;
 }) {
-  const [data, setData] = useState<{ session: Session; messages: Message[] } | null>(null);
+  // The outline covers every message in brief. It feeds the timeline, the navigation column and
+  // the list layout. Full messages load only near the view, so a large chat opens at once.
+  const [outline, setOutline] = useState<{ session: Session; items: Message[] } | null>(null);
+  const [loaded, setLoaded] = useState<(Message | undefined)[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>(() => {
     const saved = localStorage.getItem("receipts.filters");
     return saved ? JSON.parse(saved) : { tools: true, thinking: true, system: false };
   });
-  const focusRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     localStorage.setItem("receipts.filters", JSON.stringify(filters));
   }, [filters]);
 
-  // Load the chat once, then fetch only the messages after the ones already loaded. A large chat
-  // is tens of megabytes, too much to download again on every refresh.
-  const loaded = useRef<{ id: string; count: number } | null>(null);
+  // Load the outline once, then only the part after what is already loaded.
+  const outlineCount = useRef<{ id: string; count: number } | null>(null);
+  // Servers before the outline endpoint, such as an older release on a remote machine, only send
+  // whole chats. Then the app loads the whole chat on every refresh.
+  const wholeChats = useRef(false);
   useEffect(() => {
     let cancelled = false;
-    const after = loaded.current?.id === id ? loaded.current.count : 0;
-    (async () => {
-      let page = await api.session(id, after);
-      // The chat got shorter than what is loaded, so load it again from the start.
-      if (page.total < after) page = await api.session(id, 0);
+    const from = outlineCount.current?.id === id ? outlineCount.current.count : 0;
+    const loadWhole = async () => {
+      const all = await api.session(id);
       if (cancelled) return;
       setError(null);
-      setData((prev) => {
-        const keep = prev && prev.session.id === id ? prev.messages.slice(0, page.offset) : [];
-        const messages = page.offset === 0 ? page.messages : [...keep, ...page.messages];
-        loaded.current = { id, count: messages.length };
-        return { session: page.session, messages };
+      setLoaded(all.messages);
+      outlineCount.current = { id, count: all.messages.length };
+      setOutline({ session: all.session, items: all.messages });
+    };
+    (async () => {
+      if (wholeChats.current) return loadWhole();
+      let page;
+      try {
+        page = await api.outline(id, from);
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
+        wholeChats.current = true;
+        return loadWhole();
+      }
+      // The chat got shorter than what is loaded, so load it again from the start.
+      if (page.total < from) page = await api.outline(id, 0);
+      if (cancelled) return;
+      setError(null);
+      if (page.offset === 0) setLoaded([]);
+      setOutline((prev) => {
+        const keep = prev && prev.session.id === id && page.offset > 0 ? prev.items.slice(0, page.offset) : [];
+        const items = [...keep, ...page.items.map(fromOutline)];
+        outlineCount.current = { id, count: items.length };
+        return { session: page.session, items };
       });
     })().catch((e) => !cancelled && setError(String(e)));
     return () => {
@@ -56,17 +92,73 @@ export function Transcript({
     };
   }, [id, version]);
 
+  const items = useMemo(() => (outline && outline.session.id === id ? outline.items : []), [outline, id]);
+  // Positions of the messages that the list shows, in order.
+  const rows = useMemo(
+    () =>
+      items.flatMap((m, i) => {
+        const shown =
+          i === focusIdx ||
+          // Empty thinking blocks only mark time for the timeline. They have nothing to read.
+          (!(m.kind === "thinking" && !m.text.trim()) &&
+            (filters.tools || (m.kind !== "tool_use" && m.kind !== "tool_result")) &&
+            (filters.thinking || m.kind !== "thinking") &&
+            (filters.system || m.role !== "system"));
+        return shown ? [i] : [];
+      }),
+    [items, filters, focusIdx],
+  );
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (r) => estimateHeight(loaded[rows[r]] ?? items[rows[r]]),
+    getItemKey: (r) => rows[r],
+    overscan: 8,
+    paddingStart: 16,
+    paddingEnd: 64,
+    scrollPaddingStart: 12,
+  });
+  const virtualRows = virtualizer.getVirtualItems();
+
+  // Load the messages near the view that have not loaded yet, in pages.
+  const pending = useRef(new Set<string>());
+  const missing = virtualRows.map((v) => rows[v.index]).filter((i) => i !== undefined && !loaded[i]);
+  const first = missing.length ? Math.min(...missing) : -1;
+  const last = missing.length ? Math.max(...missing) : -1;
+  useEffect(() => {
+    if (first < 0) return;
+    for (let from = first - (first % PAGE); from <= last; from += PAGE) {
+      const key = `${id}:${from}`;
+      if (pending.current.has(key)) continue;
+      pending.current.add(key);
+      api
+        .session(id, from, PAGE)
+        .then((page) =>
+          setLoaded((prev) => {
+            const next = prev.slice();
+            page.messages.forEach((m, k) => {
+              // Keep a message that already loaded its full text.
+              if (!next[page.offset + k] || next[page.offset + k]?.truncated) next[page.offset + k] = m;
+            });
+            return next;
+          }),
+        )
+        .catch((e) => setError(String(e)))
+        .finally(() => pending.current.delete(key));
+    }
+  }, [id, first, last]);
+
   // Replace a shortened message with its full text when its block opens.
   const expand = useCallback(
     (idx: number) => {
       api
         .message(id, idx)
         .then((full) =>
-          setData((prev) => {
-            if (!prev || prev.session.id !== id) return prev;
-            const messages = prev.messages.slice();
-            messages[idx] = full;
-            return { ...prev, messages };
+          setLoaded((prev) => {
+            const next = prev.slice();
+            next[idx] = full;
+            return next;
           }),
         )
         .catch((e) => setError(String(e)));
@@ -74,66 +166,93 @@ export function Transcript({
     [id],
   );
 
-  // Scroll to a search hit once. Background refreshes reload `data`, and they must not scroll the chat.
+  /** Scrolls the list so that message `idx`, or the next shown message after it, is at the top. */
+  const jumpTo = useCallback(
+    (idx: number, align: "start" | "center" = "start") => {
+      const row = rows.findIndex((i) => i >= idx);
+      if (row >= 0) virtualizer.scrollToIndex(row, { align });
+    },
+    [rows, virtualizer],
+  );
+  // Messages near the end may still be loading, and the list keeps the view pinned to the bottom
+  // as they grow (see below).
+  const scrollToBottom = useCallback(() => {
+    if (rows.length) virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+  }, [rows, virtualizer]);
+
+  // Scroll to a search hit once. Refreshes must not scroll the chat again.
   const scrolledTo = useRef<string | null>(null);
   useEffect(() => {
     const key = `${id}:${focusIdx}`;
-    if (!data || data.session.id !== id || focusIdx === null || scrolledTo.current === key) return;
-    focusRef.current?.scrollIntoView({ block: "center" });
+    if (!items.length || focusIdx === null || scrolledTo.current === key) return;
+    jumpTo(focusIdx, "center");
     scrolledTo.current = key;
-  }, [data, id, focusIdx]);
+  }, [items.length, id, focusIdx, jumpTo]);
 
   // Track whether the chat is scrolled to the bottom. The ref holds the value from before the
   // latest render, so the layout effect below can tell where the reader was before new messages.
-  const messagesRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  const hasOutline = outline?.session.id === id;
+  const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const scroller = scrollRef.current;
-    const content = messagesRef.current;
-    if (!scroller || !content) return;
+    const list = listRef.current;
+    if (!scroller || !list) return;
+    // Messages that load or render late make the list taller, and the list may move the scroll
+    // position for them. If the view was at the bottom before the list grew, keep it there.
+    let lastHeight = scroller.scrollHeight;
     const check = () => {
+      const grew = scroller.scrollHeight > lastHeight;
+      lastHeight = scroller.scrollHeight;
+      if (grew && atBottomRef.current) {
+        scroller.scrollTop = scroller.scrollHeight;
+        return;
+      }
       const bottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
       atBottomRef.current = bottom;
       setAtBottom(bottom);
     };
     check();
     scroller.addEventListener("scroll", check, { passive: true });
-    // Content height changes when messages arrive or when a filter hides blocks.
     const resize = new ResizeObserver(check);
-    resize.observe(content);
+    resize.observe(list);
     return () => {
       scroller.removeEventListener("scroll", check);
       resize.disconnect();
     };
-  }, [data?.session.id]);
+  }, [hasOutline]);
 
   // When a refresh adds messages: stay pinned if the reader was at the bottom, else wiggle the button.
   const seenCount = useRef<{ id: string; count: number } | null>(null);
   const [wiggle, setWiggle] = useState(0);
   useLayoutEffect(() => {
-    if (!data) return;
+    if (!items.length) return;
     const prev = seenCount.current;
-    seenCount.current = { id: data.session.id, count: data.messages.length };
-    if (!prev || prev.id !== data.session.id || data.messages.length <= prev.count) return;
-    const scroller = scrollRef.current;
-    if (atBottomRef.current && scroller) scrollToEnd(scroller);
+    seenCount.current = { id, count: items.length };
+    if (!prev || prev.id !== id || items.length <= prev.count) return;
+    if (atBottomRef.current) scrollToBottom();
     else setWiggle((w) => w + 1);
-  }, [data]);
+  }, [items.length, id, scrollToBottom]);
 
-  const scrollToBottom = () => scrollToEnd(scrollRef.current);
+  // The first message whose bottom is below the top of the view, for the navigation column.
+  const scrollTop = virtualizer.scrollOffset ?? 0;
+  const topRow = virtualRows.find((v) => v.end > scrollTop + 24);
+  const topIdx = topRow ? rows[topRow.index] : null;
+
+  const exportMarkdown = async () => {
+    if (!outline) return;
+    try {
+      const all = await api.session(id);
+      download(outline.session, all.messages);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   if (error) return <div className="error">{error}</div>;
-  if (!data || data.session.id !== id) return <div className="empty center">Loading…</div>;
-
-  const { session, messages } = data;
-  const visible = (m: Message, i: number) =>
-    i === focusIdx ||
-    // Empty thinking blocks only mark time for the timeline. They have nothing to read.
-    (!(m.kind === "thinking" && !m.text.trim()) &&
-      (filters.tools || (m.kind !== "tool_use" && m.kind !== "tool_result")) &&
-      (filters.thinking || m.kind !== "thinking") &&
-      (filters.system || m.role !== "system"));
+  if (!outline || !hasOutline) return <div className="empty center">Loading…</div>;
+  const { session } = outline;
 
   return (
     <div className="transcript-layout">
@@ -164,29 +283,39 @@ export function Transcript({
           <button className="link" onClick={() => navigator.clipboard.writeText(session.path)} title={session.path}>
             Copy log path
           </button>
-          <button className="link" onClick={() => download(session, messages)}>
+          <button className="link" onClick={exportMarkdown}>
             Export Markdown
           </button>
         </div>
-        <Timeline messages={messages} source={session.source} onJump={(idx) => scrollToMessage(scrollRef.current, idx)} />
+        <Timeline messages={items} source={session.source} onJump={jumpTo} />
       </header>
       <div className="transcript-body">
-        <ChatNav messages={messages} scrollRef={scrollRef} />
+        <ChatNav messages={items} topIdx={topIdx} onJump={jumpTo} />
         <div className="transcript-main">
           <div className="transcript-scroll" ref={scrollRef}>
-            <div className="messages" ref={messagesRef}>
-              {messages.map((m, i) =>
-                visible(m, i) ? (
+            <div className="messages" ref={listRef} style={{ height: virtualizer.getTotalSize() }}>
+              {virtualRows.map((v) => {
+                const idx = rows[v.index];
+                const m = loaded[idx];
+                return (
                   <div
-                    key={i}
-                    id={`msg-${i}`}
-                    ref={i === focusIdx ? focusRef : undefined}
-                    className={i === focusIdx ? "focused" : undefined}
+                    key={v.key}
+                    data-index={v.index}
+                    ref={virtualizer.measureElement}
+                    id={`msg-${idx}`}
+                    className="message-row"
+                    style={{ transform: `translateY(${v.start}px)` }}
                   >
-                    <MessageView m={m} idx={i} onExpand={expand} />
+                    <div className={idx === focusIdx ? "focused" : undefined}>
+                      {m ? (
+                        <MessageView m={m} idx={idx} onExpand={expand} />
+                      ) : (
+                        <div className="placeholder" style={{ height: estimateHeight(items[idx]) - 10 }} />
+                      )}
+                    </div>
                   </div>
-                ) : null,
-              )}
+                );
+              })}
             </div>
           </div>
           {!atBottom && (
@@ -208,34 +337,6 @@ export function Transcript({
       </div>
     </div>
   );
-}
-
-/** Scrolls the chat so that message `idx` sits just below the top of the messages area. */
-function scrollToMessage(scroller: HTMLElement | null, idx: number) {
-  const el = document.getElementById(`msg-${idx}`);
-  if (!scroller || !el) return;
-  settleScroll(scroller, () => el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 12);
-}
-
-/** Scrolls the chat to its last message. */
-function scrollToEnd(scroller: HTMLElement | null) {
-  if (scroller) settleScroll(scroller, () => scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
-}
-
-/**
- * Scrolls by `distance()` until the distance is zero. Content that renders after the scroll, such
- * as a block that loads its full text, can move the target. This corrects for that over a few
- * frames.
- */
-function settleScroll(scroller: HTMLElement, distance: () => number) {
-  let frames = 0;
-  const step = () => {
-    const d = distance();
-    if (Math.abs(d) < 1 || frames++ > 10) return;
-    scroller.scrollTop += d;
-    requestAnimationFrame(step);
-  };
-  step();
 }
 
 /**
@@ -294,44 +395,28 @@ function clockTime(iso: string | null) {
   return new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 }
 
-function ChatNav({ messages, scrollRef }: { messages: Message[]; scrollRef: RefObject<HTMLDivElement | null> }) {
+function ChatNav({
+  messages,
+  topIdx,
+  onJump,
+}: {
+  messages: Message[];
+  /** First message at the top of the chat view. */
+  topIdx: number | null;
+  onJump: (idx: number) => void;
+}) {
   const prompts = messages.flatMap((m, i) => (isPrompt(m) ? [{ idx: i, text: m.text, time: clockTime(m.timestamp) }] : []));
-  const [active, setActive] = useState<number | null>(prompts[0]?.idx ?? null);
+  // Highlight the last prompt at or above the top of the chat view.
+  let active = prompts[0]?.idx ?? null;
+  if (topIdx !== null) for (const p of prompts) if (p.idx <= topIdx) active = p.idx;
   const navRef = useRef<HTMLElement>(null);
-
-  // Highlight the last prompt that has scrolled past the top of the messages area.
-  useEffect(() => {
-    const scroller = scrollRef.current;
-    if (!scroller) return;
-    let frame = 0;
-    const update = () => {
-      frame = 0;
-      const top = scroller.getBoundingClientRect().top + 24;
-      let current = prompts[0]?.idx ?? null;
-      for (const p of prompts) {
-        const el = document.getElementById(`msg-${p.idx}`);
-        if (el && el.getBoundingClientRect().top <= top) current = p.idx;
-      }
-      setActive(current);
-    };
-    const onScroll = () => {
-      if (!frame) frame = requestAnimationFrame(update);
-    };
-    update();
-    scroller.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      scroller.removeEventListener("scroll", onScroll);
-      cancelAnimationFrame(frame);
-    };
-    // React rebuilds `prompts` on every render, so the effect depends on `messages` instead.
-  }, [messages, scrollRef]);
 
   // Keep the highlighted item visible when a long chat scrolls it out of the panel.
   useEffect(() => {
     navRef.current?.querySelector(".nav-item.active")?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
-  const jump = (idx: number) => scrollToMessage(scrollRef.current, idx);
+  const jump = onJump;
 
   return (
     <nav className="chat-nav" ref={navRef}>

@@ -235,7 +235,8 @@ pub struct SessionPage {
     pub messages: Vec<Message>,
 }
 
-pub fn get_session(conn: &Connection, id: &str, after: i64) -> anyhow::Result<Option<SessionPage>> {
+/// Messages from position `from` on, at most `limit` of them.
+pub fn get_session(conn: &Connection, id: &str, from: i64, limit: i64) -> anyhow::Result<Option<SessionPage>> {
     let Some(session) = conn
         .query_row("SELECT * FROM sessions WHERE id = ?1", [id], row_to_session)
         .optional()?
@@ -243,15 +244,15 @@ pub fn get_session(conn: &Connection, id: &str, after: i64) -> anyhow::Result<Op
         return Ok(None);
     };
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE session_id = ?1", [id], |r| r.get(0))?;
-    let offset = after.clamp(0, total);
+    let offset = from.clamp(0, total);
     let mut stmt = conn.prepare(
         "SELECT role, kind,
                 substr(text, 1, CASE kind WHEN 'tool_result' THEN ?3 WHEN 'thinking' THEN ?4 ELSE ?5 END),
                 length(text), tool_name, tool_input, is_error, timestamp
-         FROM messages WHERE session_id = ?1 AND idx >= ?2 ORDER BY idx",
+         FROM messages WHERE session_id = ?1 AND idx >= ?2 ORDER BY idx LIMIT ?6",
     )?;
     let messages = stmt
-        .query_map(params![id, offset, PREVIEW_TOOL_RESULT, PREVIEW_THINKING, PREVIEW_TEXT], |r| {
+        .query_map(params![id, offset, PREVIEW_TOOL_RESULT, PREVIEW_THINKING, PREVIEW_TEXT, limit], |r| {
             let text: String = r.get(2)?;
             let full_len: i64 = r.get(3)?;
             let input: Option<String> = r.get(5)?;
@@ -270,6 +271,43 @@ pub fn get_session(conn: &Connection, id: &str, after: i64) -> anyhow::Result<Op
         })?
         .collect::<Result<_, _>>()?;
     Ok(Some(SessionPage { session, total, offset, messages }))
+}
+
+/// Most characters of a user message in the outline. The navigation column and the timeline
+/// tooltips show only the start of a prompt.
+const OUTLINE_TEXT: i64 = 160;
+
+/// Every message of a chat in brief, for the navigation column and the timeline, which need the
+/// whole chat but not its content. Each item is [timestamp, role, kind, text], where text is the
+/// start of a user message, or the first character of a thinking block so that the web app can
+/// tell empty ones apart. Other kinds get no text.
+#[derive(Serialize)]
+pub struct Outline {
+    pub session: SessionRow,
+    pub total: i64,
+    pub offset: i64,
+    pub items: Vec<(Option<String>, String, String, Option<String>)>,
+}
+
+pub fn get_outline(conn: &Connection, id: &str, from: i64) -> anyhow::Result<Option<Outline>> {
+    let Some(session) = conn
+        .query_row("SELECT * FROM sessions WHERE id = ?1", [id], row_to_session)
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE session_id = ?1", [id], |r| r.get(0))?;
+    let offset = from.clamp(0, total);
+    let mut stmt = conn.prepare(
+        "SELECT timestamp, role, kind,
+                CASE WHEN role = 'user' AND kind = 'text' THEN substr(text, 1, ?3)
+                     WHEN kind = 'thinking' THEN substr(trim(text), 1, 1) END
+         FROM messages WHERE session_id = ?1 AND idx >= ?2 ORDER BY idx",
+    )?;
+    let items = stmt
+        .query_map(params![id, offset, OUTLINE_TEXT], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(Some(Outline { session, total, offset, items }))
 }
 
 /// Shortens every string inside a JSON value to `max` characters. Returns true if it cut any.
