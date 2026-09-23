@@ -1,0 +1,27 @@
+[package]
+name = "receipts"
+version = "0.1.0"
+edition = "2021"
+description = "Review and explore your agentic chats across Claude Code, Codex and other agents"
+license = "MIT"
+repository = "https://github.com/joel-huang/receipts"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+mime_guess = "2"
+open = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+walkdir = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3
