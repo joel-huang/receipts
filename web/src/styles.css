@@ -99,7 +99,7 @@ nav { flex: 1; overflow-y: auto; padding: 0 8px; display: flex; flex-direction: 
 .row:hover { background: var(--panel); }
 .row.active { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }
 .row-top { display: flex; gap: 8px; align-items: baseline; }
-.row-title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .row-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .snippet { font-size: 13px; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 mark { background: var(--mark); color: inherit; border-radius: 2px; }
@@ -232,10 +232,50 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .thinking { color: var(--muted); font-style: italic; }
 .thinking .prose { padding: 0 12px 8px; }
 
-@media (max-width: 900px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto; height: auto; }
-  .sidebar, .list { border-right: 0; }
-  .list-body { max-height: 50vh; }
-  .transcript-body { grid-template-columns: 1fr; }
+.title-row { display: flex; align-items: flex-start; gap: 6px; }
+.icon-button { display: grid; place-items: center; width: 36px; height: 36px; flex-shrink: 0; border-radius: 8px; color: var(--text); }
+.icon-button:hover { background: var(--panel); }
+.phone-only, .drawer-backdrop { display: none; }
+.search { display: flex; gap: 6px; align-items: center; }
+.search input { flex: 1; min-width: 0; width: auto; }
+
+/* Phone layout: one screen at a time. The chat list, or a chat with a back button. */
+@media (max-width: 800px) {
+  /* minmax(0, 1fr) lets the column shrink below the width of long one-line titles. Plain 1fr
+     would widen the page, and the phone would zoom out to fit it. */
+  .app { grid-template-columns: minmax(0, 1fr); height: 100dvh; }
+  .phone-only { display: grid; }
+  .list { border-right: 0; }
+  .app.show-chat .list, .app:not(.show-chat) .detail { display: none; }
+
+  /* The sidebar slides in from the left. */
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 20; width: min(300px, 85vw);
+    transform: translateX(-100%); transition: transform 0.2s ease; box-shadow: 0 0 24px rgb(0 0 0 / 0.3);
+  }
+  .app.drawer-open .sidebar { transform: none; }
+  .app.drawer-open .drawer-backdrop { display: block; position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 0.4); }
+
+  /* While a machine connects, the switcher stays on screen above the progress. */
+  .app.connecting { grid-template-rows: auto 1fr; }
+  .app.connecting .sidebar { position: static; transform: none; width: auto; box-shadow: none; border-right: 0; }
+  .app.connecting .list { display: none; }
+
+  /* iOS zooms into inputs with text under 16px. */
+  .search input { font-size: 16px; }
+  .search { padding: 8px; }
+  .row { padding: 12px; }
+  .facet, .machine-item { padding: 10px 8px; }
+
+  .transcript-header { padding: 10px 12px 8px; }
+  .transcript-header h1 { font-size: 16px; margin: 7px 0 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .meta { gap: 4px 10px; }
+  .toggles { flex-wrap: wrap; gap: 8px 14px; }
+  .timeline-foot { flex-wrap: wrap; gap: 4px; }
+  .timeline-legend { flex-wrap: wrap; gap: 4px 10px; }
+  .transcript-body { grid-template-columns: minmax(0, 1fr); }
   .chat-nav { display: none; }
+  .transcript-scroll { padding: 0 10px; }
+  .bubble { padding: 10px 12px; }
+  .tool.result { margin-left: 12px; }
 }

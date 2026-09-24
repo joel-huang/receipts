@@ -28,6 +28,10 @@ function useHashParams(): [URLSearchParams, UpdateParams] {
   return [params, update];
 }
 
+/** Screens narrower than this get the phone layout: one screen at a time and a sidebar drawer. */
+const PHONE = "(max-width: 800px)";
+const isPhone = () => window.matchMedia(PHONE).matches;
+
 /** Name of this computer in the machine selector. */
 const LOCAL = "This computer";
 
@@ -94,7 +98,7 @@ export function App() {
   );
   if (!ready) {
     return (
-      <div className="app">
+      <div className="app connecting">
         <aside className="sidebar">{selector}</aside>
         <section className="list" />
         <main className="detail machine-status">
@@ -277,7 +281,8 @@ function Workspace({ selector }: { selector: ReactNode }) {
   useEffect(() => {
     if (autoOpened.current || sessions.length === 0) return;
     autoOpened.current = true;
-    if (!selected && !query) update({ s: sessions[0].id }, { replace: true });
+    // On a phone the list is its own screen, so opening a chat would skip it.
+    if (!selected && !query && !isPhone()) update({ s: sessions[0].id }, { replace: true });
   }, [sessions, selected, query, update]);
 
   useEffect(() => setDraft(query), [query]);
@@ -296,8 +301,14 @@ function Workspace({ selector }: { selector: ReactNode }) {
 
   const total = facets.sources.reduce((n, f) => n + f.count, 0);
 
+  // On a phone the sidebar is a drawer. Any change to the URL, such as picking a filter, closes it.
+  const [drawer, setDrawer] = useState(false);
+  const hash = params.toString();
+  useEffect(() => setDrawer(false), [hash]);
+
   return (
-    <div className="app">
+    <div className={`app ${selected ? "show-chat" : ""} ${drawer ? "drawer-open" : ""}`}>
+      <div className="drawer-backdrop" onClick={() => setDrawer(false)} />
       <aside className="sidebar">
         {selector}
         <nav>
@@ -337,11 +348,17 @@ function Workspace({ selector }: { selector: ReactNode }) {
 
       <section className="list">
         <div className="search">
+          <button className="icon-button phone-only" onClick={() => setDrawer(true)} aria-label="Open the sidebar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
           <input
             placeholder="Search every prompt, reply and tool call…"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            autoFocus
+            // On a phone, focusing would open the keyboard on every visit.
+            autoFocus={!isPhone()}
           />
         </div>
         {error && <div className="error" onClick={() => setError(null)}>{error}</div>}
@@ -400,6 +417,7 @@ function Workspace({ selector }: { selector: ReactNode }) {
             focusIdx={focusIdx ? Number(focusIdx) : null}
             version={version}
             remote={status?.remote}
+            onBack={() => update({ s: null, m: null })}
           />
         ) : (
           <div className="empty center">Select a session to review it.</div>

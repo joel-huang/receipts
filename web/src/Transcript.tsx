@@ -34,12 +34,15 @@ export function Transcript({
   focusIdx,
   version,
   remote,
+  onBack,
 }: {
   id: string;
   focusIdx: number | null;
   version: number;
   /** SSH target when the chats come from another machine. */
   remote?: string | null;
+  /** Returns to the chat list. The phone layout shows a back button for it. */
+  onBack?: () => void;
 }) {
   // The outline covers every message in brief. It feeds the timeline, the navigation column and
   // the list layout. Full messages load only near the view, so a large chat opens at once.
@@ -275,7 +278,16 @@ export function Transcript({
   return (
     <div className="transcript-layout">
       <header className="transcript-header">
-        <h1>{session.title ?? "(untitled)"}</h1>
+        <div className="title-row">
+          {onBack && (
+            <button className="icon-button phone-only" onClick={onBack} aria-label="Back to the chat list">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+            </button>
+          )}
+          <h1>{session.title ?? "(untitled)"}</h1>
+        </div>
         <div className="meta">
           <span className={`badge ${session.source}`}>{session.source}</span>
           {session.project && (
