@@ -157,18 +157,18 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .toggles label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
 .toggles label.disabled { opacity: 0.45; cursor: default; }
 /* wall-clock timeline of agent turns */
-/* Three shades of the agent color, from least to most prominent: thinking, response, tool calls.
+/* Three shades of the agent color, from most to least prominent: thinking, response, tool calls.
    Only lightness changes, so any agent color works. Dark mode reverses the lightness order. */
 .timeline {
-  --shade-think: oklch(from var(--agent) 0.80 c h);
+  --shade-think: oklch(from var(--agent) 0.44 c h);
   --shade-reply: oklch(from var(--agent) 0.62 c h);
-  --shade-tool: oklch(from var(--agent) 0.44 c h);
+  --shade-tool: oklch(from var(--agent) 0.80 c h);
   margin-top: 12px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
 }
 @media (prefers-color-scheme: dark) {
   .timeline {
-    --shade-think: oklch(from var(--agent) 0.45 c h);
-    --shade-tool: oklch(from var(--agent) 0.79 c h);
+    --shade-think: oklch(from var(--agent) 0.79 c h);
+    --shade-tool: oklch(from var(--agent) 0.45 c h);
   }
 }
 .timeline-row { display: flex; align-items: center; gap: 10px; }
@@ -185,9 +185,8 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .timeline-hit { position: absolute; top: 0; bottom: 0; padding: 0; }
 .timeline-seg {
   position: absolute; left: 0; right: 0; top: 6px; height: 8px;
-  border-radius: 2px; overflow: hidden;
+  border-radius: 2px; overflow: hidden; background: var(--agent);
 }
-.timeline-part { position: absolute; top: 0; bottom: 0; }
 .timeline-hit:hover .timeline-seg, .timeline-seg.active { filter: brightness(1.15); }
 .timeline-hit:focus-visible { outline: 2px solid var(--agent); outline-offset: 1px; border-radius: 3px; }
 .timeline-tip {
@@ -197,9 +196,14 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.15); color: var(--muted); pointer-events: none;
 }
 .timeline-tip strong { color: var(--text); font-size: 12px; }
+.timeline-tip-head { color: var(--muted); }
+.timeline-tip-label { margin-top: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.timeline-tip-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text); }
+/* The response's time split by kind, as one banded bar. */
+.timeline-tip-bands { display: flex; gap: 1px; height: 6px; margin: 6px 0 2px; border-radius: 2px; overflow: hidden; }
+.timeline-tip-bands i { display: block; min-width: 2px; }
 .timeline-tip-row { color: var(--muted); }
 .timeline-tip-row b { color: var(--text); font-weight: 600; }
-.timeline-tip-prompt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text); }
 .timeline-total { white-space: nowrap; }
 
 .loading-full { padding: 6px 10px; color: var(--muted); font-size: 12px; }

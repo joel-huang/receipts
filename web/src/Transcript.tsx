@@ -510,7 +510,19 @@ function ChatNav({
 
 type PartKind = "think" | "reply" | "tool";
 type Part = { kind: PartKind; start: number; end: number };
-type Turn = { idx: number; prompt: string; start: number; end: number; parts: Part[] };
+
+/** One agent response with the tool calls after it. Each one is a pill on the timeline. */
+type Response = {
+  /** The user message that the response answers, and its position for a jump. */
+  prompt: string;
+  promptIdx: number;
+  /** Start of the assistant's reply, and its position. Empty if the agent has not replied yet. */
+  reply: string;
+  replyIdx: number | null;
+  start: number;
+  end: number;
+  parts: Part[];
+};
 
 const PART_LABELS: Record<PartKind, string> = { think: "thinking", reply: "response", tool: "tool calls" };
 
@@ -523,23 +535,24 @@ function partKind(m: Message): PartKind | null {
 }
 
 /**
- * Splits a chat into agent turns. A turn starts at a user prompt and ends at the last message
- * before the next prompt. The time between a turn's end and the next prompt is idle time.
- * Each turn is further split into thinking, response and tool call parts.
+ * Splits a chat into agent responses. Work starts at a user message. A response holds the
+ * thinking before an assistant reply, the reply, and the tool calls after it. The next response
+ * starts where the agent resumes after those tool calls. The time between the last response and
+ * the next user message is idle time.
  */
-function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: number } | null {
-  const turns: Turn[] = [];
+function agentResponses(messages: Message[]): { responses: Response[]; start: number; end: number } | null {
+  const responses: Response[] = [];
   let start = Infinity;
   let end = -Infinity;
-  let current: Turn | null = null;
+  let current: Response | null = null;
   messages.forEach((m, idx) => {
     const t = m.timestamp ? Date.parse(m.timestamp) : NaN;
     if (Number.isNaN(t)) return;
     start = Math.min(start, t);
     end = Math.max(end, t);
     if (isTurnStart(m)) {
-      if (current) turns.push(current);
-      current = { idx, prompt: turnLabel(m), start: t, end: t, parts: [] };
+      if (current) responses.push(current);
+      current = { prompt: turnLabel(m), promptIdx: idx, reply: "", replyIdx: null, start: t, end: t, parts: [] };
       return;
     }
     if (!current || t <= current.end) return;
@@ -549,17 +562,39 @@ function agentTurns(messages: Message[]): { turns: Turn[]; start: number; end: n
     if (kind && last?.kind === kind) last.end = t;
     else if (kind) current.parts.push({ kind, start: current.end, end: t });
     current.end = t;
+    if (m.role !== "assistant" || m.kind !== "text") return;
+    if (current.replyIdx === null) {
+      current.reply = m.text;
+      current.replyIdx = idx;
+      return;
+    }
+    // A second reply starts a new response where the agent resumed after its last tool call.
+    const tools = current.parts.filter((p) => p.kind === "tool");
+    const split = tools.length ? tools[tools.length - 1].end : current.parts[current.parts.length - 1].start;
+    const next: Response = {
+      prompt: current.prompt,
+      promptIdx: current.promptIdx,
+      reply: m.text,
+      replyIdx: idx,
+      start: split,
+      end: t,
+      parts: current.parts.filter((p) => p.start >= split),
+    };
+    current.parts = current.parts.filter((p) => p.start < split);
+    current.end = split;
+    responses.push(current);
+    current = next;
   });
-  if (current) turns.push(current);
+  if (current) responses.push(current);
   if (!Number.isFinite(start) || end <= start) return null;
-  // A prompt without any agent message has no work to show.
-  return { turns: turns.filter((t) => t.end > t.start), start, end };
+  // A user message without any agent work has nothing to show.
+  return { responses: responses.filter((r) => r.end > r.start), start, end };
 }
 
 /** Total time for each part kind, in the fixed legend order. */
-function partTotals(turns: Turn[]) {
+function partTotals(responses: Response[]) {
   const totals: Record<PartKind, number> = { think: 0, reply: 0, tool: 0 };
-  for (const t of turns) for (const p of t.parts) totals[p.kind] += p.end - p.start;
+  for (const r of responses) for (const p of r.parts) totals[p.kind] += p.end - p.start;
   return totals;
 }
 
@@ -574,21 +609,17 @@ function formatDuration(ms: number) {
 
 const toIso = (ms: number) => new Date(ms).toISOString();
 
-/** Pills narrower than this grow to it, so short turns stay visible and clickable. */
+/** Pills narrower than this grow to it, so short responses stay visible and clickable. */
 const MIN_PILL_PX = 6;
-/** Pills closer than this merge, so they never overlap and separate pills keep a visible gap. */
+/** Space between pills. Responses that touch in time get this gap cut from the earlier pill. */
 const PILL_GAP_PX = 2;
 
-type Pill = { turns: Turn[]; start: number; end: number; left: number; right: number };
-
-function mainKind(totals: Record<PartKind, number>): PartKind {
-  return (Object.entries(totals) as [PartKind, number][]).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
-}
+type Pill = { responses: Response[]; start: number; end: number; left: number; right: number };
 
 /**
- * Wall-clock timeline of the chat. Filled pills are agent turns in shades of the agent's color;
- * the gaps are idle time. Each pill shows a tooltip on hover or focus, and a click jumps to its
- * first prompt.
+ * Wall-clock timeline of the chat. Each pill is an agent response in the agent's color; the gaps
+ * are idle time. The tooltip names the user message and the reply, and shows how the response's
+ * time splits into thinking, response and tool calls. A click jumps to the reply.
  */
 function Timeline({ messages, source, onJump }: { messages: Message[]; source: string; onJump: (idx: number) => void }) {
   const [hover, setHover] = useState<number | null>(null);
@@ -604,29 +635,36 @@ function Timeline({ messages, source, onJump }: { messages: Message[]; source: s
     observer.current.observe(track);
   }, []);
 
-  const data = agentTurns(messages);
+  const data = agentResponses(messages);
   if (!data) return null;
-  const { turns, start, end } = data;
+  const { responses, start, end } = data;
   const span = end - start;
   const px = (t: number) => ((t - start) / span) * width;
-  const working = turns.reduce((sum, t) => sum + (t.end - t.start), 0);
+  const working = responses.reduce((sum, r) => sum + (r.end - r.start), 0);
 
-  // Merge turns whose pills would touch or overlap at the current width.
+  // Responses that touch get a gap cut from the earlier pill. A response too narrow for that
+  // merges into the pill before it.
   const pills: Pill[] = [];
-  for (const t of turns) {
-    const left = px(t.start);
-    const right = Math.max(px(t.end), left + MIN_PILL_PX);
+  for (const r of responses) {
+    const left = px(r.start);
+    const right = Math.max(px(r.end), left + MIN_PILL_PX);
     const last = pills[pills.length - 1];
     if (last && left < last.right + PILL_GAP_PX) {
-      last.turns.push(t);
-      last.end = t.end;
-      last.right = Math.max(last.right, right);
-    } else {
-      pills.push({ turns: [t], start: t.start, end: t.end, left, right });
+      const roomToSplit = left - PILL_GAP_PX - last.left >= MIN_PILL_PX && px(r.end) - left >= MIN_PILL_PX;
+      if (!roomToSplit) {
+        last.responses.push(r);
+        last.end = r.end;
+        last.right = Math.max(last.right, right);
+        continue;
+      }
+      last.right = left - PILL_GAP_PX;
     }
+    pills.push({ responses: [r], start: r.start, end: r.end, left, right });
   }
   const shown = hover === null ? null : pills[hover];
-  const shownWork = shown ? shown.turns.reduce((sum, t) => sum + (t.end - t.start), 0) : 0;
+  const first = shown?.responses[0];
+  const shownWork = shown ? shown.responses.reduce((sum, r) => sum + (r.end - r.start), 0) : 0;
+  const shownTotals = shown ? partTotals(shown.responses) : null;
 
   return (
     <div className="timeline" style={{ ["--agent" as string]: `var(--${source}, var(--muted))` }}>
@@ -634,39 +672,46 @@ function Timeline({ messages, source, onJump }: { messages: Message[]; source: s
         <span className="timeline-time">{clockTime(toIso(start))}</span>
         <div className="timeline-track" ref={trackRef} onPointerLeave={() => setHover(null)}>
           {width > 0 &&
-            pills.map((pill, i) => (
-              <button
-                key={pill.turns[0].idx}
-                className="timeline-hit"
-                style={{ left: pill.left, width: pill.right - pill.left }}
-                onPointerEnter={() => setHover(i)}
-                onFocus={() => setHover(i)}
-                onBlur={() => setHover(null)}
-                onClick={() => onJump(pill.turns[0].idx)}
-                aria-label={`Agent worked ${formatDuration(pill.turns.reduce((sum, t) => sum + (t.end - t.start), 0))}, ${clockTime(toIso(pill.start))} to ${clockTime(toIso(pill.end))}`}
-              >
-                <span className={`timeline-seg part-${mainKind(partTotals(pill.turns))} ${hover === i ? "active" : ""}`}>
-                  {pill.turns.flatMap((t) =>
-                    t.parts.map((p) => (
-                      <span
-                        key={`${t.idx}:${p.start}`}
-                        className={`timeline-part part-${p.kind}`}
-                        style={{ left: px(p.start) - pill.left, width: px(p.end) - px(p.start) }}
-                      />
-                    )),
-                  )}
-                </span>
-              </button>
-            ))}
-          {shown && (
+            pills.map((pill, i) => {
+              const r = pill.responses[0];
+              return (
+                <button
+                  key={`${r.promptIdx}:${r.start}`}
+                  className="timeline-hit"
+                  style={{ left: pill.left, width: pill.right - pill.left }}
+                  onPointerEnter={() => setHover(i)}
+                  onFocus={() => setHover(i)}
+                  onBlur={() => setHover(null)}
+                  onClick={() => onJump(r.replyIdx ?? r.promptIdx)}
+                  aria-label={`Agent response, ${formatDuration(pill.end - pill.start)}, ${clockTime(toIso(pill.start))} to ${clockTime(toIso(pill.end))}`}
+                >
+                  <span className={`timeline-seg ${hover === i ? "active" : ""}`} />
+                </button>
+              );
+            })}
+          {shown && first && shownTotals && (
             <div className="timeline-tip" style={{ left: `${Math.min(88, Math.max(12, ((shown.left + shown.right) / 2 / width) * 100))}%` }}>
-              <strong>{formatDuration(shownWork)}</strong>
-              <span>
-                {clockTime(toIso(shown.start))}–{clockTime(toIso(shown.end))}
+              <span className="timeline-tip-head">
+                <strong>{formatDuration(shownWork)}</strong> {clockTime(toIso(shown.start))}–{clockTime(toIso(shown.end))}
               </span>
-              <span className="timeline-tip-prompt">{shown.turns[0].prompt}</span>
-              {shown.turns.length > 1 && <span>and {shown.turns.length - 1} more prompts</span>}
-              {(Object.entries(partTotals(shown.turns)) as [PartKind, number][])
+              <span className="timeline-tip-label">User</span>
+              <span className="timeline-tip-text">{first.prompt}</span>
+              {first.reply && (
+                <>
+                  <span className="timeline-tip-label">Assistant</span>
+                  <span className="timeline-tip-text">{first.reply}</span>
+                </>
+              )}
+              {shown.responses.length > 1 && <span>and {shown.responses.length - 1} more responses</span>}
+              {/* The time of the response split by kind, in the shades of the agent's color. */}
+              <span className="timeline-tip-bands">
+                {(Object.entries(shownTotals) as [PartKind, number][])
+                  .filter(([, ms]) => ms > 0)
+                  .map(([kind, ms]) => (
+                    <i key={kind} className={`part-${kind}`} style={{ flexGrow: ms }} />
+                  ))}
+              </span>
+              {(Object.entries(shownTotals) as [PartKind, number][])
                 // Hide kinds that would show as "0s".
                 .filter(([, ms]) => ms >= 500)
                 .map(([kind, ms]) => (
@@ -686,7 +731,7 @@ function Timeline({ messages, source, onJump }: { messages: Message[]; source: s
       </div>
       <div className="timeline-row timeline-foot">
         <span className="timeline-legend">
-          {(Object.entries(partTotals(turns)) as [PartKind, number][]).map(([kind, ms]) => (
+          {(Object.entries(partTotals(responses)) as [PartKind, number][]).map(([kind, ms]) => (
             <span key={kind}>
               <i className={`key-rect part-${kind}`} />
               {PART_LABELS[kind]} {formatDuration(ms)}

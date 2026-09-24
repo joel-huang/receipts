@@ -279,8 +279,8 @@ const OUTLINE_TEXT: i64 = 160;
 
 /// Every message of a chat in brief, for the navigation column and the timeline, which need the
 /// whole chat but not its content. Each item is [timestamp, role, kind, text], where text is the
-/// start of a user message, or the first character of a thinking block so that the web app can
-/// tell empty ones apart. Other kinds get no text.
+/// start of a user message or an assistant reply, or the first character of a thinking block so
+/// that the web app can tell empty ones apart. Other kinds get no text.
 #[derive(Serialize)]
 pub struct Outline {
     pub session: SessionRow,
@@ -300,7 +300,7 @@ pub fn get_outline(conn: &Connection, id: &str, from: i64) -> anyhow::Result<Opt
     let offset = from.clamp(0, total);
     let mut stmt = conn.prepare(
         "SELECT timestamp, role, kind,
-                CASE WHEN role = 'user' AND kind = 'text' THEN substr(text, 1, ?3)
+                CASE WHEN kind = 'text' AND role IN ('user', 'assistant') THEN substr(text, 1, ?3)
                      WHEN kind = 'thinking' THEN substr(trim(text), 1, 1) END
          FROM messages WHERE session_id = ?1 AND idx >= ?2 ORDER BY idx",
     )?;
